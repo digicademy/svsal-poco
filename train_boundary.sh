@@ -14,7 +14,7 @@ hf jobs uv run \
   --with 'accelerate>=1.1.0' \
   --with jiwer \
   --with tensorboard \
-  --with 'git+https://huggingface.co/spaces/mpilhlt/svsal-poco' \
+  --with 'git+https://github.com/digicademy/svsal-poco' \
   train-boundary \
     --dataset_repo mpilhlt/salamanca-abbr \
     --output_repo  mpilhlt/canine-salamanca-boundary-classifier \
