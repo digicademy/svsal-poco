@@ -4,6 +4,10 @@ Hyphenation detection and abbreviation expansion for early modern
 Spanish and Latin printed texts.
 """
 
+import subprocess
+import sys
+subprocess.run([sys.executable, "-m", "pip", "install", "sentencepiece"], check=True)
+
 import json
 import re
 import tempfile
