@@ -2,7 +2,7 @@
 
 hf jobs uv run \
   --flavor t4-small \
-  --timeout 6h \
+  --timeout 8h \
   --label Salamanca \
   --label model=canine \
   --secrets HF_TOKEN \

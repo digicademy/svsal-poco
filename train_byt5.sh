@@ -2,7 +2,7 @@
 
 hf jobs uv run \
   --flavor a10g-small \
-  --timeout 12h \
+  --timeout 2d \
   --label Salamanca \
   --label model=byt5 \
   --secrets HF_TOKEN \

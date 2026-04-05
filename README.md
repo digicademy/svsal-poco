@@ -1,13 +1,19 @@
-# Abbreviation Expansion Pipeline
+# School of Salamanca Post-Correction Pipeline
 
-Early modern Spanish/Latin printed text — nonbreaking line boundary detection
-and abbreviation expansion using Canine and ByT5-base.
+ML models for correcting early modern Spanish/Latin printed text from the
+[School of Salamanca](https://salamanca.school/) digital edition project.
+Features nonbreaking line boundary detection and abbreviation expansion using
+Canine and ByT5-base.
 
 ## Repository structure
 
 ```
 abbr-expansion/
 ├── data/
+│   ├── prepare_data/          # Scripts to prepare training data from SvSal corpus
+│   │   ├── scripts/
+│   │   │   └── *              # Various scripts to transform TEI XML to jsonl
+│   │   └── runme.sh           # Commands and explanation to prepare training data
 │   └── data_utils.py          # Shared: loading, sorting, example construction
 ├── evaluation/
 │   └── evaluation.py          # Span-level CER, exact match, type breakdown
@@ -17,11 +23,19 @@ abbr-expansion/
 │   └── train_byt5.py          # ByT5-base: train and evaluate on HF Jobs
 ├── infer.py                   # Full inference pipeline (both models chained)
 ├── requirements.txt
+├── pyproject.toml             # Project metadata for uv and other python package maintenance
 ├── job_configs.yaml           # HuggingFace Jobs launch configs
-└── README.md
+├── test-bclass.sh             # Run smoke test for boundary classifier
+├── test-byt5.sj               # Run smoke test for byt5 abbreviation expansion model
+├── train_boundary.sh          # Run boundary classifier training job on HuggingFace
+├── train.byt5.sh              # Run ByT5 expansion model training job on HuggingFace
+├── uv.lock                    # Dependencies and their versions for uv package mgmt
+└── README.md                  # This file with documentation
 ```
 
 ## Data format
+
+The training data has been created by the scripts in the [data/prepare_data](./data/prepare_data/) folder. Most importantly, the [01_create_jsonl.xsl](./data/prepare_data/scripts/01_create_jsonl.xsl) and [02_adjust_shifted_lbs.py](./data/prepare_data/scripts/02_adjust_shifted_lbs.py) scripts.
 
 Your JSONL export should have at minimum these fields per line:
 
@@ -53,20 +67,8 @@ both the boundary classifier (as positive labels) and ByT5 preprocessing
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Pushing your dataset to the Hub
-
-```python
-from huggingface_hub import HfApi
-api = HfApi()
-api.create_repo("mpilhlt/salamanca-abbr", repo_type="dataset", private=True)
-api.upload_file(
-    path_or_fileobj="data.jsonl",
-    path_in_repo="data.jsonl",
-    repo_id="mpilhlt/salamanca-abbr",
-    repo_type="dataset",
-)
+# or with uv:
+uv sync
 ```
 
 ## Training on HuggingFace Jobs
@@ -74,11 +76,11 @@ api.upload_file(
 ### Boundary classifier (Canine)
 
 ```bash
-huggingface-cli jobs run --config job_configs.yaml  # boundary section
+./train_boundary.sh
 ```
 
-Or point at `job_boundary.yaml` specifically. The job will:
-- Download `data.jsonl` from your dataset repo
+This job will do the following on HuggingFace infrastructure:
+- Download `data.jsonl` from the dataset repo (configured as `mpilhlt/salamanca-abbr`)
 - Train for 5 epochs, selecting best checkpoint by validation precision
 - Run threshold selection on the PR curve targeting ≥0.90 precision
 - Upload `boundary_eval.json`, `best_model.pt`, and `threshold.json`
@@ -87,10 +89,10 @@ Or point at `job_boundary.yaml` specifically. The job will:
 ### ByT5 abbreviation expansion
 
 ```bash
-huggingface-cli jobs run --config job_configs.yaml  # byt5 section
+./train_byt5.sh
 ```
 
-The job will:
+This job will do the following on HuggingFace infrastructure:
 - Train for up to 10 epochs with early stopping (patience 3)
 - Select best checkpoint by span CER on the validation set
 - Push each checkpoint to Hub as it is saved (`hub_strategy="every_save"`)
@@ -99,12 +101,19 @@ The job will:
 ## Inference on new texts
 
 ```bash
+huggingface-cli download mpilhlt/byt5-salamanca-abbr \
+  --repo-type model \
+  --local-dir ./byt5-salamanca-abbr
+
+huggingface-cli download mpilhlt/canine-salamanca-boundary-classifier \
+  --repo-type model \
+  --local-dir ./canine-salamanca-boundary-classifier
+
 python infer.py \
   --input             new_texts.jsonl \
   --output            expanded.jsonl \
   --boundary_model_dir ./canine-salamanca-boundary-classifier \
-  --byt5_model_dir    mpilhlt/byt5-salamanca-abbr \
-  --lexicon_data      data.jsonl \
+  --byt5_model_dir    ./byt5-salamanca-abbr \
   --batch_size        32
 ```
 
