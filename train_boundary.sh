@@ -23,6 +23,3 @@ hf jobs uv run \
     --learning_rate 2e-5 \
     --threshold     0.6 \
     --min_precision 0.90
-
-# --image huggingface/transformers-pytorch-gpu:latest \
-# --repo mpilhlt/canine-salamanca-boundary-classifier

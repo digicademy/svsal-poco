@@ -24,6 +24,5 @@ hf jobs uv run \
     --oversample_abbr 2.0 \
     --lang_prefix
 
-#  --image huggingface/transformers-pytorch-gpu:latest \
 # If OOM: reduce batch_size to 8 — effective batch size is preserved
 # by adding gradient_accumulation_steps=2 in Seq2SeqTrainingArguments.
