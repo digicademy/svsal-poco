@@ -14,7 +14,7 @@ from typing import Optional
 import gradio as gr
 import spaces
 import torch
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, login
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,16 @@ BYT5_REPO     = "mpilhlt/byt5-salamanca-abbr"
 # Displayed in the UI to show model status
 _models_loaded = False
 _load_error    = None
+
+
+# ---------------------------------------------------------------------------
+# Authenticate using the Space secret — allows access to private repos
+# in organisations the token owner belongs to
+# ---------------------------------------------------------------------------
+
+hf_token = os.environ.get("HF_TOKEN")
+if hf_token:
+    login(token=hf_token)
 
 
 # ---------------------------------------------------------------------------
