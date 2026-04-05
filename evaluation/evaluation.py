@@ -150,6 +150,18 @@ def compute_span_cer(
                 exact=(p == a.expanded_text),
             ))
 
+    # Guard against empty strings causing ZeroDivisionError in CER computation
+    try:
+        span_cer = cer_metric.compute(predictions=pred_all, references=gold_all)
+    except ZeroDivisionError:
+        span_cer = None
+    try:
+        full_line_cer = cer_metric.compute(
+            predictions=model_outputs, references=target_corrs
+        )
+    except ZeroDivisionError:
+        full_line_cer = None
+
     n_spans = len(gold_all)
     if n_spans == 0:
         return {
@@ -160,10 +172,7 @@ def compute_span_cer(
             "n_exact":          0,
             "by_abbr_type":     {},
         }
-
     n_exact       = sum(r.exact for r in results)
-    span_cer      = cer_metric.compute(predictions=pred_all,      references=gold_all)
-    full_line_cer = cer_metric.compute(predictions=model_outputs, references=target_corrs)
 
     return {
         "span_cer":         span_cer,
@@ -201,11 +210,17 @@ def build_type_breakdown(results: list[SpanResult]) -> dict:
         preds   = [r.predicted for r in type_results]
         golds   = [r.gold      for r in type_results]
 
+        # Guard against empty strings causing ZeroDivisionError in CER
+        try:
+            type_cer = cer_metric.compute(predictions=preds, references=golds)
+        except ZeroDivisionError:
+            type_cer = None
+
         breakdown[abbr_text] = {
             "n":           n,
             "n_exact":     n_exact,
             "exact_match": n_exact / n,
-            "cer":         cer_metric.compute(predictions=preds, references=golds),
+            "cer":         type_cer,
             "errors":      [
                 {"predicted": r.predicted, "gold": r.gold}
                 for r in type_results if not r.exact

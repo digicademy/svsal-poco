@@ -11,14 +11,6 @@
 #
 # Requirements: see requirements.txt
 
-# Make the project root importable regardless of where Python is invoked from
-import sys
-from pathlib import Path
-_root = Path(__file__).parent.parent
-sys.path.insert(0, str(_root))
-sys.path.insert(0, str(_root / "data"))
-sys.path.insert(0, str(_root / "evaluation"))
-
 import os
 import json
 import random
@@ -228,8 +220,10 @@ def main():
         test_ex = examples
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model     = T5ForConditionalGeneration.from_pretrained(args.model_name)
-    model.config.tie_word_embeddings = False
+    model     = T5ForConditionalGeneration.from_pretrained(
+        args.model_name,
+        tie_word_embeddings=False,
+    )
 
     # HuggingFace Datasets
     def to_hf_dataset(exs):
@@ -301,6 +295,7 @@ def main():
         seed=args.seed,
         logging_steps=100,
         report_to="tensorboard",
+        dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
     )
 
     trainer = Seq2SeqTrainer(

@@ -10,14 +10,6 @@
 # identifying which line pairs should be concatenated before being
 # passed to the ByT5 abbreviation expansion model.
 
-# Make the project root importable regardless of where Python is invoked from
-import sys
-from pathlib import Path
-_root = Path(__file__).parent.parent
-sys.path.insert(0, str(_root))
-sys.path.insert(0, str(_root / "data"))
-sys.path.insert(0, str(_root / "evaluation"))
-
 import os
 import json
 import random
