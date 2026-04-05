@@ -300,6 +300,12 @@ print("DEBUG launch args: no auth configured")
 
 with gr.Blocks(
     title="SvSal PoCo — Early Modern Text Tools",
+    theme=gr.themes.Base(
+        primary_hue="stone",
+        secondary_hue="amber",
+        font=[gr.themes.GoogleFont("IM Fell English"), "Georgia", "serif"],
+        font_mono=[gr.themes.GoogleFont("Inconsolata"), "monospace"],
+    )
 ) as demo:
 
     gr.Markdown(DESCRIPTION)
@@ -337,6 +343,7 @@ with gr.Blocks(
                             full_output_expanded = gr.Textbox(
                                 lines=12,
                                 label="Expanded output",
+                                show_copy_button=True,
                             )
                         with gr.Tab("Boundary detection"):
                             full_output_boundaries = gr.Textbox(
@@ -453,10 +460,4 @@ with gr.Blocks(
 demo.launch(
     ssr_mode=False,
     auth=None,        # explicitly disable auth
-    theme=gr.themes.Base(
-        primary_hue="stone",
-        secondary_hue="amber",
-        font=[gr.themes.GoogleFont("IM Fell English"), "Georgia", "serif"],
-        font_mono=[gr.themes.GoogleFont("Inconsolata"), "monospace"],
-    )
 )

@@ -1,4 +1,4 @@
 git+https://github.com/digicademy/svsal-poco
-gradio>=6.11.0
+gradio==4.44.1
 spaces
 sentencepiece
