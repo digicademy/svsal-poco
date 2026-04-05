@@ -1,0 +1,24 @@
+name: Sync space branch to HuggingFace Space
+
+on:
+  push:
+    branches: [space]
+  workflow_dispatch:   # allows manual trigger from GitHub Actions UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - uses: huggingface/hub-sync@v0.1.0
+        with:
+          github_repo_id: ${{ github.repository }}
+          huggingface_repo_id: mpilhlt/svsal-poco
+          hf_token: ${{ secrets.HF_TOKEN }}
+          repo_type: space
+          space_sdk: gradio
+
