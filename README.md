@@ -21,7 +21,8 @@ abbr-expansion/
 │   └── boundary_classifier.py # Canine classifier: train, evaluate, infer
 ├── byt5/
 │   └── train_byt5.py          # ByT5-base: train and evaluate on HF Jobs
-├── infer.py                   # Full inference pipeline (both models chained)
+├── infer/
+│   └── __init__.py            # Full inference pipeline (both models chained)
 ├── requirements.txt
 ├── pyproject.toml             # Project metadata for uv and other python package maintenance
 ├── job_configs.yaml           # HuggingFace Jobs launch configs
@@ -109,13 +110,16 @@ huggingface-cli download mpilhlt/canine-salamanca-boundary-classifier \
   --repo-type model \
   --local-dir ./canine-salamanca-boundary-classifier
 
-python infer.py \
-  --input             new_texts.jsonl \
-  --output            expanded.jsonl \
+python -m infer \
+  --input              new_texts.jsonl \
+  --output             expanded.jsonl \
   --boundary_model_dir ./canine-salamanca-boundary-classifier \
-  --byt5_model_dir    ./byt5-salamanca-abbr \
-  --batch_size        32
+  --byt5_model_dir     ./byt5-salamanca-abbr \
+  --batch_size         32
 ```
+
+If the package is installed, you can run the last command also directly
+with the `infer` command.
 
 Input JSONL needs: `id`, `doc_id`, `source_sic`, `lang`. No abbreviation
 markup is expected — the pipeline handles detection via the boundary
