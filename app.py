@@ -85,11 +85,23 @@ def load_models():
         )["threshold"]
 
         # --- ByT5 ---
-        byt5_tokenizer = AutoTokenizer.from_pretrained(BYT5_REPO)
-        byt5_model     = T5ForConditionalGeneration.from_pretrained(
-            BYT5_REPO, tie_word_embeddings=False
-        )
-        byt5_model.eval()
+        # The tokenizer can be loaded directly from the "google/byt5-base"
+        # checkpoint since it uses the same byte-level tokenization.
+        # The model weights are loaded from our custom checkpoint, which
+        # has the same architecture but different fine-tuned weights. We set
+        # tie_word_embeddings=False to avoid an error about mismatched vocab sizes,
+        # since the custom checkpoint doesn't include the tied embeddings that the
+        # original ByT5 uses.
+        # byt5_tokenizer = AutoTokenizer.from_pretrained(BYT5_REPO)
+        byt5_tokenizer = AutoTokenizer.from_pretrained("google/byt5-base")
+        try:
+            byt5_model = T5ForConditionalGeneration.from_pretrained(
+                BYT5_REPO, tie_word_embeddings=False
+            )
+            byt5_model.eval()
+        except Exception as e:
+            print(f"ByT5 model not available: {e}")
+            byt5_model = None
 
         _models_loaded = True
 
@@ -234,10 +246,11 @@ def run_boundary_only(text: str) -> str:
 
 @spaces.GPU(duration=300)
 def run_full_pipeline(text: str) -> tuple[str, str, str]:
+    if byt5_model is None:
+        return "ByT5 model not yet trained — abbreviation expansion unavailable.", "", ""
     if not text.strip():
         return "Please enter some text.", "", ""
     return expand_text(text)
-
 
 # ---------------------------------------------------------------------------
 # XML tab placeholder
