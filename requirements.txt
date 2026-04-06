@@ -73,13 +73,13 @@ scipy==1.17.1
 setuptools==81.0.0
 shellingham==1.5.4
 six==1.17.0
--e file:///home/awagner/vcs/digicademy/svsal-poco
+# -e file:///home/awagner/vcs/digicademy/svsal-poco
 sympy==1.14.0
 tensorboard==2.20.0
 tensorboard-data-server==0.7.2
 threadpoolctl==3.6.0
 tokenizers==0.22.2
-torch==2.11.0
+torch==2.3.0
 tqdm==4.67.3
 transformers==5.5.0
 triton==3.6.0

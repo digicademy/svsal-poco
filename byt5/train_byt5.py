@@ -70,6 +70,7 @@ def parse_args():
     p.add_argument("--output_dir",        default="./boundary-classifier-output", help="Local output directory (for local testing mode)")
     p.add_argument("--epochs",            type=int,   default=10)
     p.add_argument("--batch_size",        type=int,   default=16)
+    p.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients for (to achieve larger effective batch size on limited VRAM)")
     p.add_argument("--learning_rate",     type=float, default=1e-4)
     p.add_argument("--max_input_length",  type=int,   default=512)
     p.add_argument("--max_target_length", type=int,   default=512)
@@ -77,11 +78,13 @@ def parse_args():
     p.add_argument("--lang_prefix",       action="store_true")
     p.add_argument("--seed",              type=int,   default=42)
     p.add_argument("--hf_token",          default=os.environ.get("HF_TOKEN"))
-    # p.add_argument("--threshold",     type=float, default=0.6)
-    # p.add_argument("--min_precision", type=float, default=0.90)
-    # p.add_argument("--use_lexicon",   action="store_true")
+    p.add_argument("--wandb_key",         default=os.environ.get("WANDB_API_KEY"))
+    p.add_argument("--wandb_project",     default=os.environ.get("WANDB_PROJECT", "byt5-salamanca-abbr"))
+    p.add_argument("--wandb_entity",      default=os.environ.get("WANDB_ENTITY", None))
+    p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
+    p.add_argument("--bf16",              action="store_true", help="Use bf16 mixed precision (A10G support; requires compatible GPU and drivers)")
+    p.add_argument("--fp16",              action="store_true", help="Use fp16 mixed precision (for GPUs without bf16 support; requires compatible GPU and drivers)")
     return p.parse_args()
-
 
 # ---------------------------------------------------------------------------
 # Tokenization
@@ -224,6 +227,16 @@ def main():
     args = parse_args()
     random.seed(args.seed)
 
+    # --- Fail fast if GPU requested but unavailable ---
+    if args.bf16 or args.fp16:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "bf16/fp16 requested but no CUDA GPU is available. "
+                "Check driver compatibility or remove --bf16/--fp16 flag."
+            )
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+
     # --- Resolve data path ---
     if args.dataset_local:
         data_path = args.dataset_local
@@ -289,14 +302,26 @@ def main():
         "test":  to_hf_dataset(test_ex),
     })
 
-    tokenize_fn = make_tokenize_fn(
-        tokenizer, args.max_input_length, args.max_target_length
-    )
-    tokenized = raw.map(
-        tokenize_fn,
-        batched=True,
-        remove_columns=["source", "target", "has_abbr", "doc_id", "lang"],
-    )
+    cache_path = output_dir / "tokenized_cache"
+    if args.use_cache and cache_path.exists():
+        print("Loading tokenized dataset from cache...")
+        tokenized = DatasetDict.load_from_disk(str(cache_path))
+    else:
+        print("Tokenizing dataset...")
+        tokenize_fn = make_tokenize_fn(
+            tokenizer, args.max_input_length, args.max_target_length
+        )
+        tokenized = raw.map(
+            tokenize_fn,
+            batched=True,
+            remove_columns=["source", "target", "has_abbr", "doc_id", "lang"],
+        )
+        if args.use_cache:
+            tokenized.save_to_disk(str(cache_path))
+            print(f"Tokenized dataset cached to {cache_path}")
+        else:
+            print("Tokenized dataset not cached (use --use_cache to enable caching)")
+    print(f"Tokenized dataset: {tokenized}")
 
     # Data collator — pads per batch rather than globally
     collator = DataCollatorForSeq2Seq(
@@ -312,14 +337,8 @@ def main():
 
     # --- Training arguments: checkpoints go into output_dir/checkpoints ---
     checkpoints_dir = output_dir / "checkpoints"
-    training_args = Seq2SeqTrainingArguments(
+    training_kwargs = dict(
         output_dir=str(checkpoints_dir),
-
-        # Hub integration only when use_hub is True
-        push_to_hub=use_hub,
-        hub_model_id=args.output_repo if use_hub else None,
-        **({"hub_strategy": "every_save"} if use_hub else {}),
-
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
@@ -327,12 +346,14 @@ def main():
         learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",
         weight_decay=0.01,
-        bf16=True,   # Mixed precision to save memory. A10G and A100H support bfloat16; use fp16=True if not available
+
+        bf16=args.bf16, # Mixed precision to save memory, as configured in command-line
+        fp16=args.fp16, # A10G support bf16; use fp16=True if not available
         # If we have to use smaller batches to avoid OOM,
         # we have to compensate with gradient accumulation to reach
         # an effective batch size of at least 16
         # (gradient_accumulation_steps * batch_size = effective batch size)
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
 
         predict_with_generate=True,
         generation_max_length=args.max_target_length,
@@ -350,7 +371,14 @@ def main():
         logging_steps=100,
         report_to="all", # tensorboard + WandB (if installed and logged in)
         dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
+
+        # Hub integration only when use_hub is True
+        push_to_hub=use_hub,
+        hub_model_id=args.output_repo if use_hub else None,
     )
+    if use_hub:
+        training_kwargs["hub_strategy"] = "every_save"
+    training_args = Seq2SeqTrainingArguments(**training_kwargs)
 
     trainer = Seq2SeqTrainer(
         model=model,
@@ -366,9 +394,10 @@ def main():
     )
 
     # --- Initialize WandB run (optional, but recommended for rich logging and visualization) ---
+    wandb.login(key=args.wandb_key)
     wandb.init(
-        entity="mpilhlt",
-        project="byt5-salamanca-abbr",
+        project=args.wandb_project,
+        entity=args.wandb_entity,   # None means wandb uses your default entity
         name=f"byt5-base-{args.epochs}ep-bs{args.batch_size}",
         config=vars(args),
     )

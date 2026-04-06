@@ -23,17 +23,16 @@ abbr-expansion/
 │   └── train_byt5.py          # ByT5-base: train and evaluate on HF Jobs
 ├── infer/
 │   └── __init__.py            # Full inference pipeline (both models chained)
-├── requirements.txt
-├── pyproject.toml             # Project metadata for uv and other python package maintenance
-├── job_configs.yaml           # HuggingFace Jobs launch configs
-├── test-bclass.sh             # Run smoke test for boundary classifier
-├── test-byt5.sj               # Run smoke test for byt5 abbreviation expansion model
-├── train_boundary.sh          # Run boundary classifier training job on HuggingFace
-├── train.byt5.sh              # Run ByT5 expansion model training job on HuggingFace
-├── uv.lock                    # Dependencies and their versions for uv package mgmt
 ├── env.template               # A template for you to create your own .env file with
 │                              # secrets. Currently used only for WandB monitoring (optional)
+├── pyproject.toml             # Project metadata for uv and other python package maintenance
 └── README.md                  # This file with documentation
+├── requirements.txt
+├── test_boundary.sh             # Run smoke test for boundary classifier
+├── test_byt5.sj               # Run smoke test for byt5 abbreviation expansion model
+├── train_boundary.sh          # Run boundary classifier training job on HuggingFace
+├── train.byt5.sh              # Run ByT5 expansion model training job on HuggingFace
+├── uv.lock2                    # Dependencies and their versions for uv package mgmt
 ```
 
 ## Data format
