@@ -180,25 +180,20 @@ def format_carbon_info(
 
     if tracking_mode == "unavailable":
         lines = [
-            "**This request:** CO2 not measurable on this hardware "
-            "(GPU energy monitoring restricted)",
-            f"**Cumulative ({n} requests):** {kg_total*1000:.2f} g CO2eq tracked so far",
+            f"This request: CO2 not measurable on this hardware",
+            f"Cumulative ({n} requests): {kg_total*1000:.2f} g CO2eq tracked so far",
         ]
     else:
         g_this  = request_kg * 1000
         km_this = request_kg / 0.000404
-        note    = " *(CPU estimate only)*" if tracking_mode == "cpu_only" else ""
+        note    = " (CPU estimate only)" if tracking_mode == "cpu_only" else ""
         lines   = [
-            f"**This request:** {g_this:.4f} g CO2eq "
-            f"(≈ {km_this:.1f} m driving){note}",
-            f"**Cumulative ({n} requests):** {kg_total*1000:.2f} g CO2eq "
-            f"(≈ {km_total:.2f} m driving)",
+            f"This request: {g_this:.4f} g CO2eq (≈ {km_this:.1f} m driving){note}",
+            f"Cumulative ({n} requests): {kg_total*1000:.2f} g CO2eq (≈ {km_total:.2f} m driving)",
         ]
 
     if accumulated["first_request"]:
-        lines.append(
-            f"*Tracking since {accumulated['first_request'][:10]}*"
-        )
+        lines.append(f"Tracking since {accumulated['first_request'][:10]}")
     return "\n".join(lines)
 
 
