@@ -69,45 +69,46 @@ if hf_token:
 # Emissions tracking — backed by a JSON file in a Hub dataset repo
 # ---------------------------------------------------------------------------
 
-def make_emissions_tracker() -> EmissionsTracker:
+def make_emissions_tracker() -> tuple:
     """
     Create an EmissionsTracker appropriate for the current hardware.
 
-    On ZeroGPU, CUDA_VISIBLE_DEVICES is set to a MIG UUID string which
-    CodeCarbon cannot parse as an integer GPU ID. We detect this and
-    fall back to CPU-only tracking. On standard GPU hardware, full
-    GPU tracking is used.
+    On ZeroGPU, calls to nvml for enumerating GPUs/CPUs do not work
+    and we try workarounds.
+    On standard GPU hardware, full GPU tracking is used.
+    Returns (tracker, mode) where mode is 'full', 'cpu_only', or 'unavailable'.
     """
+
     cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    is_restricted = cuda_devices and not cuda_devices.replace(",", "").isdigit()
 
-    # ZeroGPU sets CUDA_VISIBLE_DEVICES to a UUID like "MIGa911bf..."
-    # Detect this by checking if the value contains non-integer characters
-    is_mig = cuda_devices and not cuda_devices.replace(",", "").replace("-", "").isdigit()
-
-    if is_mig:
-        print(f"ZeroGPU MIG device detected — falling back to CPU-only carbon tracking")
-        # Temporarily hide the GPU from CodeCarbon by clearing CUDA_VISIBLE_DEVICES
-        # ZeroGPU's NVML permissions don't allow CodeCarbon's device enumeration
-        old_val = os.environ.get("CUDA_VISIBLE_DEVICES")
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    if is_restricted:
+        # ZeroGPU environment — NVML access is restricted
+        # Try CPU-only tracking by hiding GPU entirely
+        saved = os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         try:
             tracker = EmissionsTracker(
                 log_level="error",
                 save_to_file=False,
             )
+            print("Carbon tracking: CPU-only mode (ZeroGPU)")
+            return tracker, "cpu_only"
+        except Exception as e:
+            print(f"Carbon tracking unavailable on this hardware: {e}")
+            return None, "unavailable"
         finally:
-            # Restore the original value so the actual model inference still uses the GPU
-            if old_val is not None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = old_val
-            else:
-                del os.environ["CUDA_VISIBLE_DEVICES"]
-        return tracker
+            if saved is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = saved
     else:
-        print(f"Standard GPU tracking (CUDA_VISIBLE_DEVICES={cuda_devices!r})")
-        return EmissionsTracker(
-            log_level="error",
-            save_to_file=False,
-        )
+        try:
+            tracker = EmissionsTracker(
+                log_level="error",
+                save_to_file=False,
+            )
+            return tracker, "full"
+        except Exception as e:
+            print(f"Carbon tracking unavailable: {e}")
+            return None, "unavailable"
 
 
 def load_accumulated_emissions() -> dict:
@@ -173,26 +174,27 @@ def format_carbon_info(
     accumulated: dict,
     tracking_mode: str = "full",
 ) -> str:
-    g_this   = request_kg * 1000
     kg_total = accumulated["kg_co2eq_total"]
     n        = accumulated["n_requests"]
-    km_this  = request_kg / 0.000404
-    km_total = kg_total   / 0.000404
+    km_total = kg_total / 0.000404
 
-    precision_note = (
-        "*(CPU estimate only — GPU not directly measurable on this hardware)*"
-        if tracking_mode == "cpu_only"
-        else ""
-    )
+    if tracking_mode == "unavailable":
+        lines = [
+            "**This request:** CO2 not measurable on this hardware "
+            "(GPU energy monitoring restricted)",
+            f"**Cumulative ({n} requests):** {kg_total*1000:.2f} g CO2eq tracked so far",
+        ]
+    else:
+        g_this  = request_kg * 1000
+        km_this = request_kg / 0.000404
+        note    = " *(CPU estimate only)*" if tracking_mode == "cpu_only" else ""
+        lines   = [
+            f"**This request:** {g_this:.4f} g CO2eq "
+            f"(≈ {km_this:.1f} m driving){note}",
+            f"**Cumulative ({n} requests):** {kg_total*1000:.2f} g CO2eq "
+            f"(≈ {km_total:.2f} m driving)",
+        ]
 
-    lines = [
-        f"**This request:** {g_this:.4f} g CO2eq "
-        f"(≈ {km_this:.1f} m driving a petrol car)",
-        f"**Cumulative ({n} requests):** {kg_total*1000:.2f} g CO2eq "
-        f"(≈ {km_total:.2f} m driving)",
-    ]
-    if precision_note:
-        lines.append(precision_note)
     if accumulated["first_request"]:
         lines.append(
             f"*Tracking since {accumulated['first_request'][:10]}*"
@@ -384,18 +386,15 @@ def run_boundary_only(text: str) -> tuple[str, str]:
     if not text.strip():
         return "Please enter some text.", ""
 
-    tracker = make_emissions_tracker()
-    is_cpu_only = os.environ.get("CUDA_VISIBLE_DEVICES", "").replace(",", "").isdigit() == False
-    tracker.start()
+    tracker, mode = make_emissions_tracker()
+    if tracker:
+        tracker.start()
+
     result     = classify_boundaries_only(text)
-    request_kg = tracker.stop()
+    request_kg = tracker.stop() if tracker else 0.0
 
     accumulated = record_request_emissions(request_kg)
-    carbon_info = format_carbon_info(
-        request_kg,
-        accumulated,
-        tracking_mode="cpu_only" if is_cpu_only else "full",
-    )
+    carbon_info = format_carbon_info(request_kg, accumulated, tracking_mode=mode)
 
     return result, carbon_info
 
@@ -407,18 +406,15 @@ def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
     if not text.strip():
         return "Please enter some text.", "", "", ""
 
-    tracker = make_emissions_tracker()
-    is_cpu_only = os.environ.get("CUDA_VISIBLE_DEVICES", "").replace(",", "").isdigit() == False
-    tracker.start()
+    tracker, mode = make_emissions_tracker()
+    if tracker:
+        tracker.start()
+
     expanded, boundaries, diff = expand_text(text)
-    request_kg  = tracker.stop()
+    request_kg = tracker.stop() if tracker else 0.0
 
     accumulated = record_request_emissions(request_kg)
-    carbon_info = format_carbon_info(
-        request_kg,
-        accumulated,
-        tracking_mode="cpu_only" if is_cpu_only else "full",
-    )
+    carbon_info = format_carbon_info(request_kg, accumulated, tracking_mode=mode)
 
     return expanded, boundaries, diff, carbon_info
 
