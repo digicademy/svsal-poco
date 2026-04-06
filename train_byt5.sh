@@ -14,7 +14,7 @@ hf jobs uv run \
   --with 'evaluate>=0.4.0' \
   --with 'scikit-learn>=1.3.0' \
   --with 'accelerate>=1.1.0' \
-  --with 'torch==2.5.1' \
+  --with 'torch>=2.6.0' \
   --with jiwer \
   --with tensorboard \
   --with wandb \
