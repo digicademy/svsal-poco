@@ -20,6 +20,7 @@ import spaces
 import torch
 from huggingface_hub import hf_hub_download, login
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
+from codecarbon import EmissionsTracker
 
 # ---------------------------------------------------------------------------
 # These imports resolve at runtime on the Space because the package is
@@ -245,12 +246,23 @@ def run_boundary_only(text: str) -> str:
 
 
 @spaces.GPU(duration=300)
-def run_full_pipeline(text: str) -> tuple[str, str, str]:
+def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
     if byt5_model is None:
-        return "ByT5 model not yet trained — abbreviation expansion unavailable.", "", ""
+        return "ByT5 model not yet trained — abbreviation expansion unavailable.", "", "", ""
     if not text.strip():
-        return "Please enter some text.", "", ""
-    return expand_text(text)
+        return "Please enter some text.", "", "", ""
+
+    tracker = EmissionsTracker(log_level="error", save_to_file=False)
+    tracker.start()
+    expanded, boundaries, diff = expand_text(text)
+    emissions = tracker.stop()
+
+    carbon_info = (
+        f"Estimated CO2 for this request: {emissions*1000:.4f} g CO2eq.\n"
+        # f"Equivalent to {emissions/0.000404:.1f}m of driving a petrol car"
+    )
+
+    return expanded, boundaries, diff, carbon_info
 
 # ---------------------------------------------------------------------------
 # XML tab placeholder
@@ -352,6 +364,12 @@ with gr.Blocks(
                                 lines=12,
                                 label="Lines where expansions were made",
                             )
+                        with gr.Tab("CO2eq estimate"):
+                            full_output_carbon = gr.Textbox(
+                                lines=2,
+                                label="Environmental cost",
+                                interactive=False,
+                            )
 
             full_btn.click(
                 fn=run_full_pipeline,
@@ -360,6 +378,7 @@ with gr.Blocks(
                     full_output_expanded,
                     full_output_boundaries,
                     full_output_diff,
+                    full_output_carbon,
                 ],
             )
 

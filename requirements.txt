@@ -1,3 +1,4 @@
 git+https://github.com/digicademy/svsal-poco
 spaces
 sentencepiece
+codecarbon>=2.3.0
