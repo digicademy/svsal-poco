@@ -2,6 +2,7 @@
 __pycache__/
 test-output/
 test-output-byt5/
+.env
 *.pyc
 *.pt
 *.jsonl
