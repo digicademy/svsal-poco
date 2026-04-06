@@ -458,6 +458,5 @@ with gr.Blocks(
 
 
 demo.launch(
-    ssr_mode=False,
     auth=None,        # explicitly disable auth
 )
