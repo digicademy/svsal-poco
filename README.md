@@ -31,7 +31,7 @@ abbr-expansion/
 ├── test_boundary.sh             # Run smoke test for boundary classifier
 ├── test_byt5.sj               # Run smoke test for byt5 abbreviation expansion model
 ├── train_boundary.sh          # Run boundary classifier training job on HuggingFace
-├── train.byt5.sh              # Run ByT5 expansion model training job on HuggingFace
+├── train_byt5.sh              # Run ByT5 expansion model training job on HuggingFace
 ├── uv.lock2                    # Dependencies and their versions for uv package mgmt
 ```
 
