@@ -14,6 +14,7 @@ hf jobs uv run \
   --with 'evaluate>=0.4.0' \
   --with 'scikit-learn>=1.3.0' \
   --with 'accelerate>=1.1.0' \
+  --with 'torch==2.5.1' \
   --with jiwer \
   --with tensorboard \
   --with wandb \
@@ -35,4 +36,3 @@ hf jobs uv run \
 
 # If OOM: reduce batch_size to from — and preserve effective batch size
 # by increasing gradient_accumulation_steps.
-# --with 'torch==2.3.0' \
