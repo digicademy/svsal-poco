@@ -82,23 +82,33 @@ def make_emissions_tracker() -> EmissionsTracker:
 
     # ZeroGPU sets CUDA_VISIBLE_DEVICES to a UUID like "MIGa911bf..."
     # Detect this by checking if the value contains non-integer characters
-    is_mig = cuda_devices and not cuda_devices.replace(",", "").isdigit()
+    is_mig = cuda_devices and not cuda_devices.replace(",", "").replace("-", "").isdigit()
 
     if is_mig:
-        print(f"ZeroGPU MIG device detected ({cuda_devices[:16]}...) "
-              f"— falling back to CPU-only carbon tracking")
-        return EmissionsTracker(
-            log_level="error",
-            save_to_file=False,
-            tracking_mode="machine",
-            gpu_ids=[],
-        )
+        print(f"ZeroGPU MIG device detected — falling back to CPU-only carbon tracking")
+        # Temporarily hide the GPU from CodeCarbon by clearing CUDA_VISIBLE_DEVICES
+        # ZeroGPU's NVML permissions don't allow CodeCarbon's device enumeration
+        old_val = os.environ.get("CUDA_VISIBLE_DEVICES")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        try:
+            tracker = EmissionsTracker(
+                log_level="error",
+                save_to_file=False,
+            )
+        finally:
+            # Restore the original value so the actual model inference still uses the GPU
+            if old_val is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = old_val
+            else:
+                del os.environ["CUDA_VISIBLE_DEVICES"]
+        return tracker
     else:
         print(f"Standard GPU tracking (CUDA_VISIBLE_DEVICES={cuda_devices!r})")
         return EmissionsTracker(
             log_level="error",
             save_to_file=False,
         )
+
 
 def load_accumulated_emissions() -> dict:
     """Download and parse the persistent emissions file from the Hub."""
