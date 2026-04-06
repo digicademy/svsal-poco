@@ -13,6 +13,7 @@ dependencies = [
     "torch>=2.1.0",
     "transformers>=4.40.0",
     "codecarbon>=2.3.0",
+    "wandb>=0.16.0",
     "sentencepiece",
 ]
 

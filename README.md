@@ -31,6 +31,8 @@ abbr-expansion/
 ├── train_boundary.sh          # Run boundary classifier training job on HuggingFace
 ├── train.byt5.sh              # Run ByT5 expansion model training job on HuggingFace
 ├── uv.lock                    # Dependencies and their versions for uv package mgmt
+├── env.template               # A template for you to create your own .env file with
+│                              # secrets. Currently used only for WandB monitoring (optional)
 └── README.md                  # This file with documentation
 ```
 

@@ -14,6 +14,8 @@ hf jobs uv run \
   --with 'accelerate>=1.1.0' \
   --with jiwer \
   --with tensorboard \
+  --with wandb \
+  --with codecarbon \
   --with 'git+https://github.com/digicademy/svsal-poco' \
   train-boundary \
     --dataset_repo mpilhlt/salamanca-abbr \

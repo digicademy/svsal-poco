@@ -1,6 +1,26 @@
 # train_byt5.py
 #
 # ByT5-base abbreviation expansion — full training script for HuggingFace Jobs.
+#
+# Task: sequence-to-sequence expansion of marked input lines, using the same
+# examples as the boundary classifier but with the full line as input and the
+# fully expanded line as output. ByT5's byte-level tokenization allows it to
+# handle the full variety of Unicode characters in the source and target text
+# without special-casing, and to learn character-level expansion patterns.
+#
+# The script is designed to run in two modes:
+# 1) Local testing mode: specify a local JSONL path with --dataset_local and
+#    an output directory with --output_dir. No Hub integration.
+# 2) HuggingFace Hub/Jobs mode: specify a dataset repo with --dataset_repo and
+#    a model repo with --output_repo. The script will read the data
+#    from the dataset repo, train the model, and push the best checkpoint and
+#    test breakdown to the model repo at the end of training.
+#
+# The model runs as the second stage of a pipeline, following the boundary
+# classifier. The boundary classifier identifies which line pairs should be
+# concatenated before being passed to the ByT5 abbreviation expansion
+# model. The model presupposes the availability of this concatenation
+# information in inferencing.
 
 import os
 import json
@@ -13,6 +33,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import numpy as np
 import torch
 import evaluate as hf_evaluate
+import wandb
 
 from datasets import Dataset, DatasetDict
 from transformers import (
@@ -191,7 +212,7 @@ class CarbonTrackerCallback(TrainerCallback):
         emissions_path.write_text(json.dumps({
             "kg_co2eq":     emissions,
             "model":        "google/byt5-base",
-            "hardware":     "a10g-small",
+            "hardware":     "a100-large",
         }, indent=2, ensure_ascii=False))
 
 
@@ -306,10 +327,12 @@ def main():
         learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",
         weight_decay=0.01,
-        # We have to use small batches (4) to avoid OOM,
-        # so we compensate with gradient accumulation to reach
-        # an effective batch size of 4*4=16
-        gradient_accumulation_steps=4,
+        bf16=True,   # Mixed precision to save memory. A10G and A100H support bfloat16; use fp16=True if not available
+        # If we have to use smaller batches to avoid OOM,
+        # we have to compensate with gradient accumulation to reach
+        # an effective batch size of at least 16
+        # (gradient_accumulation_steps * batch_size = effective batch size)
+        gradient_accumulation_steps=1,
 
         predict_with_generate=True,
         generation_max_length=args.max_target_length,
@@ -325,7 +348,7 @@ def main():
 
         seed=args.seed,
         logging_steps=100,
-        report_to="tensorboard",
+        report_to="all", # tensorboard + WandB (if installed and logged in)
         dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
     )
 
@@ -342,6 +365,13 @@ def main():
         ],
     )
 
+    # --- Initialize WandB run (optional, but recommended for rich logging and visualization) ---
+    wandb.init(
+        entity="mpilhlt",
+        project="byt5-salamanca-abbr",
+        name=f"byt5-base-{args.epochs}ep-bs{args.batch_size}",
+        config=vars(args),
+    )
 
     trainer.train()
 
