@@ -303,6 +303,19 @@ def main():
     })
 
     cache_path = output_dir / "tokenized_cache"
+    if args.use_cache and not cache_path.exists() and use_hub:
+        try:
+            print("Downloading tokenized cache from Hub...")
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id=args.output_repo,
+                local_dir=str(output_dir),
+                allow_patterns="tokenized_cache/**",
+                repo_type="model",
+            )
+            print("Cache downloaded.")
+        except Exception:
+            print("No cached tokenization found on Hub, will tokenize from scratch.")
     if args.use_cache and cache_path.exists():
         print("Loading tokenized dataset from cache...")
         tokenized = DatasetDict.load_from_disk(str(cache_path))
@@ -322,6 +335,14 @@ def main():
         else:
             print("Tokenized dataset not cached (use --use_cache to enable caching)")
     print(f"Tokenized dataset: {tokenized}")
+    if use_hub and args.use_cache:
+        print("Uploading tokenized cache to Hub...")
+        api.upload_folder(
+            folder_path=str(cache_path),
+            path_in_repo="tokenized_cache",
+            repo_id=args.output_repo,
+            repo_type="model",
+        )
 
     # Data collator — pads per batch rather than globally
     collator = DataCollatorForSeq2Seq(

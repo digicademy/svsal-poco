@@ -26,8 +26,8 @@ hf jobs uv run \
       --wandb_project byt5-salamanca-abbr \
       --wandb_entity mpilhlt \
       --epochs 10 \
-      --batch_size 128 \
-      --gradient_accumulation_steps 1 \
+      --batch_size 64 \
+      --gradient_accumulation_steps 2 \
       --learning_rate 1e-4 \
       --oversample_abbr 2.0 \
       --bf16 \
