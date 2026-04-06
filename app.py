@@ -296,10 +296,14 @@ lib. Lex est communis ciuitatis cōsensus qui
 scriptis præceperit quomodò vnumquodq́;
 agendum sit."""
 
-print("DEBUG launch args: no auth configured")
-
 with gr.Blocks(
     title="SvSal PoCo — Early Modern Text Tools",
+    theme=gr.themes.Base(
+        primary_hue="stone",
+        secondary_hue="amber",
+        font=[gr.themes.GoogleFont("IM Fell English"), "Georgia", "serif"],
+        font_mono=[gr.themes.GoogleFont("Inconsolata"), "monospace"],
+    ),
 ) as demo:
 
     gr.Markdown(DESCRIPTION)
@@ -453,10 +457,4 @@ with gr.Blocks(
 demo.launch(
     ssr_mode=False,
     auth=None,        # explicitly disable auth
-    theme=gr.themes.Base(
-        primary_hue="stone",
-        secondary_hue="amber",
-        font=[gr.themes.GoogleFont("IM Fell English"), "Georgia", "serif"],
-        font_mono=[gr.themes.GoogleFont("Inconsolata"), "monospace"],
-    ),
 )
