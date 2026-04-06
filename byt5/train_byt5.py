@@ -1,21 +1,14 @@
 # train_byt5.py
 #
 # ByT5-base abbreviation expansion — full training script for HuggingFace Jobs.
-#
-# Workflow:
-#   1. Push your JSONL dataset to the Hub as a private dataset repository
-#   2. Launch a job pointing at this script (see job_config.yaml)
-#   3. The job trains, saves checkpoints to Hub after each epoch,
-#      and uploads a test breakdown JSON on completion
-#   4. Pull the best checkpoint for inference
-#
-# Requirements: see requirements.txt
 
 import os
 import json
 import random
 import argparse
 from pathlib import Path
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import numpy as np
 import torch
@@ -279,6 +272,10 @@ def main():
         learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",
         weight_decay=0.01,
+        # We have to use small batches (4) to avoid OOM,
+        # so we compensate with gradient accumulation to reach
+        # an effective batch size of 4*4=16
+        gradient_accumulation_steps=4,
 
         predict_with_generate=True,
         generation_max_length=args.max_target_length,

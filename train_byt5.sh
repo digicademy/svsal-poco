@@ -6,6 +6,7 @@ hf jobs uv run \
   --label Salamanca \
   --label model=byt5 \
   --secrets HF_TOKEN \
+  --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --with 'transformers>=4.40.0' \
   --with 'torch>=2.1.0' \
   --with 'datasets>=2.18.0' \
@@ -19,10 +20,10 @@ hf jobs uv run \
     --dataset_repo mpilhlt/salamanca-abbr \
     --output_repo  mpilhlt/byt5-salamanca-abbr \
     --epochs 10 \
-    --batch_size 16 \
+    --batch_size 4 \
     --learning_rate 1e-4 \
     --oversample_abbr 2.0 \
     --lang_prefix
 
-# If OOM: reduce batch_size to 8 — effective batch size is preserved
-# by adding gradient_accumulation_steps=2 in Seq2SeqTrainingArguments.
+# If OOM: reduce batch_size to from 16 to 8 or 4 — effective batch size is preserved
+# by adding gradient_accumulation_steps=2 (or 4) in Seq2SeqTrainingArguments.
