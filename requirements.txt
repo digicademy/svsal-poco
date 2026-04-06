@@ -9,6 +9,7 @@ attrs==26.1.0
 certifi==2026.2.25
 charset-normalizer==3.4.7
 click==8.3.2
+codecarbon>=2.3.0
 cuda-bindings==13.2.0
 cuda-pathfinder==1.5.1
 cuda-toolkit==13.0.2

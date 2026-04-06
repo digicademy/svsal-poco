@@ -25,6 +25,9 @@ from transformers import (
 )
 from huggingface_hub import login, HfApi, hf_hub_download
 
+from codecarbon import EmissionsTracker
+from transformers import TrainerCallback
+
 from data.data_utils import load_and_sort_lines, build_byt5_examples, document_split
 from evaluation.evaluation import compute_span_cer
 
@@ -159,6 +162,37 @@ def make_compute_metrics(tokenizer, val_sources):
         }
 
     return compute_metrics
+
+
+# ---------------------------------------------------------------------------
+# Carbon tracking callback for HuggingFace Trainer --- optional but
+# recommended for monitoring training emissions, especially on GPU.
+# Logs total CO2 emissions at the end of training.
+# ---------------------------------------------------------------------------
+
+class CarbonTrackerCallback(TrainerCallback):
+    def __init__(self, output_dir: str):
+        self.tracker = EmissionsTracker(
+            project_name="byt5-salamanca-abbr",
+            output_dir=output_dir,
+            log_level="warning",
+        )
+        self.output_dir = Path(output_dir)
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.tracker.start()
+
+    def on_train_end(self, args, state, control, **kwargs):
+        emissions = self.tracker.stop()
+        print(f"Training CO2: {emissions:.4f} kg CO2eq")
+
+        # Write structured summary alongside other outputs
+        emissions_path = self.output_dir / "emissions.json"
+        emissions_path.write_text(json.dumps({
+            "kg_co2eq":     emissions,
+            "model":        "google/byt5-base",
+            "hardware":     "a10g-small",
+        }, indent=2, ensure_ascii=False))
 
 
 # ---------------------------------------------------------------------------
@@ -302,8 +336,12 @@ def main():
         eval_dataset=tokenized["val"],
         data_collator=collator,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=[
+            EarlyStoppingCallback(early_stopping_patience=3),
+            CarbonTrackerCallback(str(output_dir)),
+        ],
     )
+
 
     trainer.train()
 

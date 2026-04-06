@@ -29,6 +29,9 @@ from sklearn.metrics import (
 )
 from huggingface_hub import login, HfApi, hf_hub_download
 
+from codecarbon import EmissionsTracker
+from transformers import TrainerCallback
+
 from data.data_utils import (
     BoundaryExample,
     CorpusLexicon,
@@ -378,6 +381,16 @@ def train(
     optimizer  = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     pos_weight = compute_pos_weight(train_examples).to(device)
 
+    # --- Start carbon tracking ---
+    from codecarbon import EmissionsTracker
+    tracker = EmissionsTracker(
+        project_name="canine-salamanca-boundary-classifier",
+        output_dir=output_dir,
+        output_file="emissions.csv",
+        log_level="warning",
+    )
+    tracker.start()
+
     best_precision = 0.0
     best_state     = None
 
@@ -411,6 +424,18 @@ def train(
             best_precision = val_metrics["precision"]
             best_state     = {k: v.cpu().clone()
                               for k, v in model.state_dict().items()}
+
+    # --- Stop tracking and save ---
+    emissions = tracker.stop()
+    print(f"Training CO2: {emissions:.4f} kg CO2eq")
+
+    emissions_path = Path(output_dir) / "emissions.json"
+    emissions_path.write_text(json.dumps({
+        "kg_co2eq":   emissions,
+        "model":      "google/canine-s",
+        "epochs":     epochs,
+        "hardware":   "t4-small",
+    }, indent=2, ensure_ascii=False))
 
     model.load_state_dict(best_state)
     Path(output_dir).mkdir(exist_ok=True)
