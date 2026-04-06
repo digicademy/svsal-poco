@@ -9,16 +9,18 @@ import sys
 subprocess.run([sys.executable, "-m", "pip", "install", "sentencepiece"], check=True)
 
 import json
+from datetime import datetime, timezone
 import re
 import tempfile
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
 import gradio as gr
 import spaces
 import torch
-from huggingface_hub import hf_hub_download, login
+from huggingface_hub import HfApi, hf_hub_download, login
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 from codecarbon import EmissionsTracker
 
@@ -39,12 +41,18 @@ from infer import run_pipeline
 # Constants
 # ---------------------------------------------------------------------------
 
-BOUNDARY_REPO = "mpilhlt/canine-salamanca-boundary-classifier"
-BYT5_REPO     = "mpilhlt/byt5-salamanca-abbr"
+BOUNDARY_REPO       = "mpilhlt/canine-salamanca-boundary-classifier"
+BYT5_REPO           = "mpilhlt/byt5-salamanca-abbr"
+EMISSIONS_REPO      = os.environ.get("SPACE_ID", "awagner-mainz/svsal-poco")
+EMISSIONS_REPO_TYPE = "space"
+EMISSIONS_FILE      = "inference_emissions.json"
+_UPLOAD_EVERY_N     = 10
 
-# Displayed in the UI to show model status
 _models_loaded = False
 _load_error    = None
+_emissions_lock   = threading.Lock()           # thread-safe updates
+_session_emissions = {"kg": 0.0, "n": 0}
+_api              = HfApi()
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +63,88 @@ _load_error    = None
 hf_token = os.environ.get("HF_TOKEN")
 if hf_token:
     login(token=hf_token)
+
+
+# ---------------------------------------------------------------------------
+# Persistent emissions store — backed by a JSON file in a Hub dataset repo
+# ---------------------------------------------------------------------------
+
+def load_accumulated_emissions() -> dict:
+    """Download and parse the persistent emissions file from the Hub."""
+    try:
+        path = hf_hub_download(
+            repo_id=EMISSIONS_REPO,
+            filename=EMISSIONS_FILE,
+            repo_type=EMISSIONS_REPO_TYPE,
+            force_download=True,   # always get fresh copy
+        )
+        return json.loads(Path(path).read_text())
+    except Exception:
+        # File doesn't exist yet — first run
+        return {
+            "kg_co2eq_total": 0.0,
+            "n_requests":     0,
+            "first_request":  None,
+            "last_request":   None,
+        }
+
+
+def save_accumulated_emissions(accumulated: dict):
+    """Upload updated emissions file to Hub dataset repo."""
+    try:
+        content = json.dumps(accumulated, indent=2, ensure_ascii=False)
+        _api.upload_file(
+            path_or_fileobj=content.encode(),
+            path_in_repo=EMISSIONS_FILE,
+            repo_id=EMISSIONS_REPO,
+            repo_type=EMISSIONS_REPO_TYPE,
+            commit_message="Update inference emissions",
+        )
+    except Exception as e:
+        print(f"Warning: could not persist emissions: {e}")
+
+
+def record_request_emissions(kg_co2eq: float) -> dict:
+    """
+    Thread-safe update of the persistent emissions accumulator.
+    Returns the updated accumulated dict for display.
+    """
+    with _emissions_lock:
+        _session_emissions["kg"] += kg_co2eq
+        _session_emissions["n"]  += 1
+
+        accumulated = load_accumulated_emissions()
+        accumulated["kg_co2eq_total"] += kg_co2eq
+        accumulated["n_requests"]     += 1
+        accumulated["last_request"]    = datetime.now(timezone.utc).isoformat()
+        if accumulated["first_request"] is None:
+            accumulated["first_request"] = accumulated["last_request"]
+
+        # Only persist every N requests to reduce Hub commit noise
+        if _session_emissions["n"] % _UPLOAD_EVERY_N == 0:
+            save_accumulated_emissions(accumulated)
+
+        return accumulated
+
+
+def format_carbon_info(request_kg: float, accumulated: dict) -> str:
+    g_this   = request_kg * 1000
+    kg_total = accumulated["kg_co2eq_total"]
+    n        = accumulated["n_requests"]
+    km_this  = request_kg / 0.000404
+    km_total = kg_total   / 0.000404
+
+    lines = [
+        f"**This request:** {g_this:.4f} g CO2eq "
+        f"(≈ {km_this:.1f} m driving a petrol car)",
+        f"**Cumulative ({n} requests):** {kg_total*1000:.2f} g CO2eq "
+        f"(≈ {km_total:.2f} m driving)",
+    ]
+    if accumulated["first_request"]:
+        lines.append(
+            f"*Tracking since {accumulated['first_request'][:10]}*"
+        )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -239,10 +329,19 @@ def expand_text(text: str) -> tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 
 @spaces.GPU(duration=300)
-def run_boundary_only(text: str) -> str:
+def run_boundary_only(text: str) -> tuple[str, str]:
     if not text.strip():
-        return "Please enter some text."
-    return classify_boundaries_only(text)
+        return "Please enter some text.", ""
+
+    tracker = EmissionsTracker(log_level="error", save_to_file=False)
+    tracker.start()
+    result     = classify_boundaries_only(text)
+    request_kg = tracker.stop()
+
+    accumulated = record_request_emissions(request_kg)
+    carbon_info = format_carbon_info(request_kg, accumulated)
+
+    return result, carbon_info
 
 
 @spaces.GPU(duration=300)
@@ -255,12 +354,10 @@ def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
     tracker = EmissionsTracker(log_level="error", save_to_file=False)
     tracker.start()
     expanded, boundaries, diff = expand_text(text)
-    emissions = tracker.stop()
+    request_kg  = tracker.stop()
 
-    carbon_info = (
-        f"Estimated CO2 for this request: {emissions*1000:.4f} g CO2eq.\n"
-        # f"Equivalent to {emissions/0.000404:.1f}m of driving a petrol car"
-    )
+    accumulated = record_request_emissions(request_kg)
+    carbon_info = format_carbon_info(request_kg, accumulated)
 
     return expanded, boundaries, diff, carbon_info
 
@@ -364,10 +461,10 @@ with gr.Blocks(
                                 lines=12,
                                 label="Lines where expansions were made",
                             )
-                        with gr.Tab("CO2eq estimate"):
+                        with gr.Tab("Environmental cost"):
                             full_output_carbon = gr.Textbox(
-                                lines=2,
-                                label="Environmental cost",
+                                lines=4,
+                                label="CO2 emissions",
                                 interactive=False,
                             )
 
@@ -409,11 +506,16 @@ with gr.Blocks(
                         lines=12,
                         label="Annotated output",
                     )
+                    boundary_carbon = gr.Textbox(
+                        lines=4,
+                        label="CO2 emissions",
+                        interactive=False,
+                    )
 
             boundary_btn.click(
                 fn=run_boundary_only,
                 inputs=boundary_input,
-                outputs=boundary_output,
+                outputs=[boundary_output, boundary_carbon],
             )
 
         # ---------------------------------------------------------------
