@@ -4,9 +4,9 @@ Hyphenation detection and abbreviation expansion for early modern
 Spanish and Latin printed texts.
 """
 
-import subprocess
 import sys
-subprocess.run([sys.executable, "-m", "pip", "install", "sentencepiece"], check=True)
+# import subprocess
+# subprocess.run([sys.executable, "-m", "pip", "install", "sentencepiece"], check=True)
 
 import json
 from datetime import datetime, timezone
@@ -29,7 +29,7 @@ from codecarbon import EmissionsTracker
 # installed via requirements.txt. Editor warnings about unresolved imports
 # in the space branch can be ignored.
 # ---------------------------------------------------------------------------
-from boundary_classifier.boundary_classifier import BoundaryClassifier
+from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_boundaries
 from data.data_utils import (
     ABBR_OPEN, ABBR_CLOSE, LINE_SEP,
     CorpusLexicon,
@@ -66,8 +66,39 @@ if hf_token:
 
 
 # ---------------------------------------------------------------------------
-# Persistent emissions store — backed by a JSON file in a Hub dataset repo
+# Emissions tracking — backed by a JSON file in a Hub dataset repo
 # ---------------------------------------------------------------------------
+
+def make_emissions_tracker() -> EmissionsTracker:
+    """
+    Create an EmissionsTracker appropriate for the current hardware.
+
+    On ZeroGPU, CUDA_VISIBLE_DEVICES is set to a MIG UUID string which
+    CodeCarbon cannot parse as an integer GPU ID. We detect this and
+    fall back to CPU-only tracking. On standard GPU hardware, full
+    GPU tracking is used.
+    """
+    cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+
+    # ZeroGPU sets CUDA_VISIBLE_DEVICES to a UUID like "MIGa911bf..."
+    # Detect this by checking if the value contains non-integer characters
+    is_mig = cuda_devices and not cuda_devices.replace(",", "").isdigit()
+
+    if is_mig:
+        print(f"ZeroGPU MIG device detected ({cuda_devices[:16]}...) "
+              f"— falling back to CPU-only carbon tracking")
+        return EmissionsTracker(
+            log_level="error",
+            save_to_file=False,
+            tracking_mode="machine",
+            gpu_ids=[],
+        )
+    else:
+        print(f"Standard GPU tracking (CUDA_VISIBLE_DEVICES={cuda_devices!r})")
+        return EmissionsTracker(
+            log_level="error",
+            save_to_file=False,
+        )
 
 def load_accumulated_emissions() -> dict:
     """Download and parse the persistent emissions file from the Hub."""
@@ -127,12 +158,22 @@ def record_request_emissions(kg_co2eq: float) -> dict:
         return accumulated
 
 
-def format_carbon_info(request_kg: float, accumulated: dict) -> str:
+def format_carbon_info(
+    request_kg: float,
+    accumulated: dict,
+    tracking_mode: str = "full",
+) -> str:
     g_this   = request_kg * 1000
     kg_total = accumulated["kg_co2eq_total"]
     n        = accumulated["n_requests"]
     km_this  = request_kg / 0.000404
     km_total = kg_total   / 0.000404
+
+    precision_note = (
+        "*(CPU estimate only — GPU not directly measurable on this hardware)*"
+        if tracking_mode == "cpu_only"
+        else ""
+    )
 
     lines = [
         f"**This request:** {g_this:.4f} g CO2eq "
@@ -140,6 +181,8 @@ def format_carbon_info(request_kg: float, accumulated: dict) -> str:
         f"**Cumulative ({n} requests):** {kg_total*1000:.2f} g CO2eq "
         f"(≈ {km_total:.2f} m driving)",
     ]
+    if precision_note:
+        lines.append(precision_note)
     if accumulated["first_request"]:
         lines.append(
             f"*Tracking since {accumulated['first_request'][:10]}*"
@@ -166,7 +209,7 @@ def load_models():
         boundary_model   = BoundaryClassifier(use_lexicon=False)
         weights_path     = hf_hub_download(BOUNDARY_REPO, "best_model.pt")
         boundary_model.load_state_dict(
-            torch.load(weights_path, map_location="cpu")
+            torch.load(weights_path, map_location="cpu", weights_only=True)
         )
         boundary_model.eval()
 
@@ -238,8 +281,6 @@ def classify_boundaries_only(text: str) -> str:
     Run only the boundary classifier and return annotated text showing
     which line boundaries were detected as nonbreaking.
     """
-    from boundary_classifier.boundary_classifier import predict_boundaries
-
     rows   = lines_to_jsonl_rows(text)
     result = predict_boundaries(
         lines=rows,
@@ -333,13 +374,18 @@ def run_boundary_only(text: str) -> tuple[str, str]:
     if not text.strip():
         return "Please enter some text.", ""
 
-    tracker = EmissionsTracker(log_level="error", save_to_file=False)
+    tracker = make_emissions_tracker()
+    is_cpu_only = os.environ.get("CUDA_VISIBLE_DEVICES", "").replace(",", "").isdigit() == False
     tracker.start()
     result     = classify_boundaries_only(text)
     request_kg = tracker.stop()
 
     accumulated = record_request_emissions(request_kg)
-    carbon_info = format_carbon_info(request_kg, accumulated)
+    carbon_info = format_carbon_info(
+        request_kg,
+        accumulated,
+        tracking_mode="cpu_only" if is_cpu_only else "full",
+    )
 
     return result, carbon_info
 
@@ -351,13 +397,18 @@ def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
     if not text.strip():
         return "Please enter some text.", "", "", ""
 
-    tracker = EmissionsTracker(log_level="error", save_to_file=False)
+    tracker = make_emissions_tracker()
+    is_cpu_only = os.environ.get("CUDA_VISIBLE_DEVICES", "").replace(",", "").isdigit() == False
     tracker.start()
     expanded, boundaries, diff = expand_text(text)
     request_kg  = tracker.stop()
 
     accumulated = record_request_emissions(request_kg)
-    carbon_info = format_carbon_info(request_kg, accumulated)
+    carbon_info = format_carbon_info(
+        request_kg,
+        accumulated,
+        tracking_mode="cpu_only" if is_cpu_only else "full",
+    )
 
     return expanded, boundaries, diff, carbon_info
 
@@ -407,12 +458,6 @@ agendum sit."""
 
 with gr.Blocks(
     title="SvSal PoCo — Early Modern Text Tools",
-    theme=gr.themes.Base(
-        primary_hue="stone",
-        secondary_hue="amber",
-        font=[gr.themes.GoogleFont("IM Fell English"), "Georgia", "serif"],
-        font_mono=[gr.themes.GoogleFont("Inconsolata"), "monospace"],
-    ),
 ) as demo:
 
     gr.Markdown(DESCRIPTION)
@@ -578,4 +623,10 @@ with gr.Blocks(
 demo.launch(
     ssr_mode=False,
     auth=None,        # explicitly disable auth
+    theme=gr.themes.Base(
+        primary_hue="stone",
+        secondary_hue="amber",
+        font=[gr.themes.GoogleFont("IM Fell English"), "Georgia", "serif"],
+        font_mono=[gr.themes.GoogleFont("Inconsolata"), "monospace"],
+    ),
 )
