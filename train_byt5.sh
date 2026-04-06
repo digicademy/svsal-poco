@@ -10,7 +10,6 @@ hf jobs uv run \
   --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --env WANDB_WATCH=all \
   --with 'transformers>=4.40.0' \
-  --with 'torch==2.3.0' \
   --with 'datasets>=2.18.0' \
   --with 'evaluate>=0.4.0' \
   --with 'scikit-learn>=1.3.0' \
@@ -36,3 +35,4 @@ hf jobs uv run \
 
 # If OOM: reduce batch_size to from — and preserve effective batch size
 # by increasing gradient_accumulation_steps.
+# --with 'torch==2.3.0' \
