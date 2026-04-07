@@ -332,25 +332,27 @@ def main():
         tokenized = raw.map(
             tokenize_fn,
             batched=True,
-            num_proc=args.tokenizer_num_proc, # use multiple available CPU threads for faster tokenization
+            num_proc=args.tokenizer_num_proc,
             remove_columns=["source", "target", "has_abbr", "doc_id", "lang"],
         )
+        if args.use_cache:
+            tokenized.save_to_disk(str(cache_path))
+            print(f"Tokenized dataset cached to {cache_path}")
+            if use_hub:
+                print("Uploading tokenized cache to Hub...")
+                try:
+                    api.upload_folder(
+                        folder_path=str(cache_path),
+                        path_in_repo="tokenized_cache",
+                        repo_id=args.output_repo,
+                        repo_type="model",
+                    )
+                    print("Cache uploaded to Hub.")
+                except Exception as e:
+                    print(f"Warning: cache upload failed ({e}). Training will continue.")
+        else:
+            print("Tokenized dataset not cached (use --use_cache to enable caching)")
     print(f"Tokenized dataset: {tokenized}")
-    if args.use_cache:
-        tokenized.save_to_disk(str(cache_path))
-        print(f"Tokenized dataset cached to {cache_path}")
-        if use_hub:
-            print("Uploading tokenized cache to Hub...")
-            try:
-                api.upload_folder(
-                    folder_path=str(cache_path),
-                    path_in_repo="tokenized_cache",
-                    repo_id=args.output_repo,
-                    repo_type="model",
-                )
-                print("Cache uploaded to Hub.")
-            except Exception as e:
-                print(f"Warning: cache upload failed ({e}). Training will continue.")
 
     # Data collator — pads per batch rather than globally
     collator = DataCollatorForSeq2Seq(
