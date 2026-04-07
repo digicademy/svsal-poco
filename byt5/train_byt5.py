@@ -313,9 +313,12 @@ def main():
                 allow_patterns="tokenized_cache/**",
                 repo_type="model",
             )
-            print("Cache downloaded.")
-        except Exception:
-            print("No cached tokenization found on Hub, will tokenize from scratch.")
+            if cache_path.exists():
+                print("Cache downloaded successfully.")
+            else:
+                print("No cached tokenization found on Hub, will tokenize from scratch.")
+        except Exception as e:
+            print(f"Cache download failed ({e}), will tokenize from scratch.")
     if args.use_cache and cache_path.exists():
         print("Loading tokenized dataset from cache...")
         tokenized = DatasetDict.load_from_disk(str(cache_path))
@@ -329,20 +332,22 @@ def main():
             batched=True,
             remove_columns=["source", "target", "has_abbr", "doc_id", "lang"],
         )
-        if args.use_cache:
-            tokenized.save_to_disk(str(cache_path))
-            print(f"Tokenized dataset cached to {cache_path}")
-        else:
-            print("Tokenized dataset not cached (use --use_cache to enable caching)")
     print(f"Tokenized dataset: {tokenized}")
-    if use_hub and args.use_cache:
-        print("Uploading tokenized cache to Hub...")
-        api.upload_folder(
-            folder_path=str(cache_path),
-            path_in_repo="tokenized_cache",
-            repo_id=args.output_repo,
-            repo_type="model",
-        )
+    if args.use_cache:
+        tokenized.save_to_disk(str(cache_path))
+        print(f"Tokenized dataset cached to {cache_path}")
+        if use_hub:
+            print("Uploading tokenized cache to Hub...")
+            try:
+                api.upload_folder(
+                    folder_path=str(cache_path),
+                    path_in_repo="tokenized_cache",
+                    repo_id=args.output_repo,
+                    repo_type="model",
+                )
+                print("Cache uploaded to Hub.")
+            except Exception as e:
+                print(f"Warning: cache upload failed ({e}). Training will continue.")
 
     # Data collator — pads per batch rather than globally
     collator = DataCollatorForSeq2Seq(
