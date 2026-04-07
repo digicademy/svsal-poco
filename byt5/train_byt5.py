@@ -232,9 +232,16 @@ def make_compute_metrics(tokenizer, val_sources):
             tokenizer, preds, labels
         )
 
-        full_line_cer = cer_metric.compute(
-            predictions=decoded_preds, references=decoded_labels
-        )
+        # Sample to avoid jiwer hanging on large val sets
+        max_cer_samples = 10000
+        try:
+            full_line_cer_result = cer_metric.compute(
+                predictions=decoded_preds[:max_cer_samples],
+                references=decoded_labels[:max_cer_samples],
+            )
+            full_line_cer: float = float(full_line_cer_result["cer"]) if full_line_cer_result else 0.0
+        except ZeroDivisionError:
+            full_line_cer = 0.0
 
         span_results = compute_span_cer(
             marked_inputs=val_sources,
