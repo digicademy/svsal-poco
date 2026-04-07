@@ -454,6 +454,7 @@ def main():
     print(f"Tokenized dataset: {tokenized}")
 
     # Data collator — pads per batch rather than globally
+    print("Initializing data collator...")
     collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
         model=model,
@@ -471,8 +472,6 @@ def main():
         output_dir=str(checkpoints_dir),
 
         warmup_steps=500,
-        dataloader_num_workers=4,
-        dataloader_prefetch_factor=2,
         lr_scheduler_type="cosine",
         weight_decay=0.01,
         predict_with_generate=True,
@@ -524,6 +523,7 @@ def main():
             every_n_epochs=1,
         ))
 
+    print("Initializing Trainer...")
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
@@ -535,6 +535,7 @@ def main():
     )
 
     # --- Initialize WandB run (optional, but recommended for rich logging and visualization) ---
+    print("Initializing WandB...")
     wandb.login(key=args.wandb_key)
     wandb.init(
         project=args.wandb_project,
@@ -543,19 +544,22 @@ def main():
         config=vars(args),
     )
 
+    print("Starting training...")
     trainer.train()
+    print("Training complete.")
 
     # --- Test evaluation ---
     test_sources = [e["source"] for e in test_ex]
     test_targets = [e["target"] for e in test_ex]
 
+    print("Running test evaluation...")
     test_output = trainer.predict(tokenized["test"])
     test_preds, test_labels = decode_predictions(
         tokenizer,
         test_output.predictions,
         test_output.label_ids,
     )
-
+    print("Test evaluation complete. Computing test metrics...")
     test_metrics = compute_span_cer(
         marked_inputs=test_sources,
         model_outputs=test_preds,
@@ -576,6 +580,7 @@ def main():
 
     # --- Optionally push to Hub ---
     if use_hub:
+        print("Uploading test breakdown to Hub...")
         api.upload_file(
             path_or_fileobj=str(breakdown_path),
             path_in_repo="test_breakdown.json",

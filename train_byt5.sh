@@ -1,6 +1,6 @@
 #!/bin/sh
 
-hf jobs uv run \
+HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1 hf jobs uv run \
   --flavor a100-large \
   --timeout 2d \
   --label Salamanca \
