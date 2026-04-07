@@ -150,18 +150,6 @@ def compute_span_cer(
                 exact=(p == a.expanded_text),
             ))
 
-    # Guard against empty strings causing ZeroDivisionError in CER computation
-    try:
-        span_cer = cer_metric.compute(predictions=pred_all, references=gold_all)
-    except ZeroDivisionError:
-        span_cer = None
-    try:
-        full_line_cer = cer_metric.compute(
-            predictions=model_outputs, references=target_corrs
-        )
-    except ZeroDivisionError:
-        full_line_cer = None
-
     n_spans = len(gold_all)
     if n_spans == 0:
         return {
@@ -172,7 +160,25 @@ def compute_span_cer(
             "n_exact":          0,
             "by_abbr_type":     {},
         }
-    n_exact       = sum(r.exact for r in results)
+
+    n_exact = sum(r.exact for r in results)
+
+    try:
+        span_cer_result = cer_metric.compute(predictions=pred_all, references=gold_all)
+        span_cer: float = float(span_cer_result["cer"]) if span_cer_result else 0.0
+    except ZeroDivisionError:
+        span_cer = 0.0
+
+    # Full-line CER is computed on a sample to avoid hanging on large val sets
+    max_cer_samples = 10000
+    try:
+        full_line_cer_result = cer_metric.compute(
+            predictions=model_outputs[:max_cer_samples],
+            references=target_corrs[:max_cer_samples],
+        )
+        full_line_cer: float = float(full_line_cer_result["cer"]) if full_line_cer_result else 0.0
+    except ZeroDivisionError:
+        full_line_cer = 0.0
 
     return {
         "span_cer":         span_cer,
@@ -182,7 +188,6 @@ def compute_span_cer(
         "n_exact":          n_exact,
         "by_abbr_type":     build_type_breakdown(results),
     }
-
 
 def build_type_breakdown(results: list[SpanResult]) -> dict:
     """
@@ -212,9 +217,10 @@ def build_type_breakdown(results: list[SpanResult]) -> dict:
 
         # Guard against empty strings causing ZeroDivisionError in CER
         try:
-            type_cer = cer_metric.compute(predictions=preds, references=golds)
+            type_cer_result = cer_metric.compute(predictions=preds, references=golds)
+            type_cer: float = float(type_cer_result["cer"]) if type_cer_result else 0.0
         except ZeroDivisionError:
-            type_cer = None
+            type_cer = 0.0
 
         breakdown[abbr_text] = {
             "n":           n,

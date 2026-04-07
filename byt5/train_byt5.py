@@ -27,6 +27,8 @@ import json
 import random
 import argparse
 from pathlib import Path
+import signal
+from contextlib import contextmanager
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -143,6 +145,67 @@ def decode_predictions(tokenizer, predictions, labels):
     decoded_preds  = tokenizer.batch_decode(predictions, skip_special_tokens=True)
     decoded_labels = tokenizer.batch_decode(labels,      skip_special_tokens=True)
     return decoded_preds, decoded_labels
+
+
+# ---------------------------------------------------------------------------
+# Hub upload callback for HuggingFace Trainer — optional, but useful for
+# saving checkpoints to the Hub during training, especially when using HuggingFace Jobs.
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def timeout(seconds: int):
+    """Context manager that raises TimeoutError after given seconds."""
+    def handler(signum, frame):
+        raise TimeoutError(f"Upload timed out after {seconds}s")
+    old_handler = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+class PeriodicHubUploadCallback(TrainerCallback):
+    def __init__(
+        self,
+        output_dir:    str,
+        repo_id:       str,
+        every_n_epochs: int = 1,
+        timeout_secs:  int = 300,   # 5 minutes max per upload
+    ):
+        self.output_dir    = Path(output_dir)
+        self.repo_id       = repo_id
+        self.every_n       = every_n_epochs
+        self.timeout_secs  = timeout_secs
+        self.api           = HfApi()
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if not (state.epoch and int(state.epoch) % self.every_n == 0):
+            return
+
+        checkpoint_dir = (self.output_dir / "checkpoints"
+                          / f"checkpoint-{state.global_step}")
+        if not checkpoint_dir.exists():
+            print(f"Checkpoint dir {checkpoint_dir} not found, skipping upload")
+            return
+
+        print(f"Uploading checkpoint at epoch {state.epoch} "
+              f"(timeout: {self.timeout_secs}s)...")
+        try:
+            with timeout(self.timeout_secs):
+                self.api.upload_folder(
+                    folder_path=str(checkpoint_dir),
+                    path_in_repo=f"checkpoints/checkpoint-{state.global_step}",
+                    repo_id=self.repo_id,
+                    repo_type="model",
+                    commit_message=f"Checkpoint epoch {state.epoch:.0f}",
+                )
+            print("Checkpoint uploaded successfully.")
+        except TimeoutError as e:
+            print(f"Warning: {e} — skipping checkpoint upload, training continues.")
+        except Exception as e:
+            print(f"Warning: checkpoint upload failed ({e}) — training continues.")
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +466,7 @@ def main():
 
         seed=args.seed,
         logging_steps=100,
-        report_to="all", # tensorboard + WandB (if installed and logged in)
+        report_to=["wandb", "tensorboard"],
         dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
 
         # Hub integration only when use_hub is True
@@ -414,6 +477,17 @@ def main():
         training_kwargs["hub_strategy"] = "end" # for reliability reasons, we changed this from "every_save" to "end" to avoid issues with intermittent Hub connectivity during training. This means the model will only be pushed to the Hub at the end of training, not after every checkpoint.
     training_args = Seq2SeqTrainingArguments(**training_kwargs)
 
+    callbacks = [
+        EarlyStoppingCallback(early_stopping_patience=3),
+        CarbonTrackerCallback(str(output_dir)),
+    ]
+    if use_hub:
+        callbacks.append(PeriodicHubUploadCallback(
+            output_dir=str(output_dir),
+            repo_id=args.output_repo,
+            every_n_epochs=1,
+        ))
+
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
@@ -421,10 +495,7 @@ def main():
         eval_dataset=tokenized["val"],
         data_collator=collator,
         compute_metrics=compute_metrics,
-        callbacks=[
-            EarlyStoppingCallback(early_stopping_patience=3),
-            CarbonTrackerCallback(str(output_dir)),
-        ],
+        callbacks=callbacks,
     )
 
     # --- Initialize WandB run (optional, but recommended for rich logging and visualization) ---
