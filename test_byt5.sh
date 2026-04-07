@@ -10,5 +10,6 @@ CUDA_VISIBLE_DEVICES="" WANDB_MODE=disabled python byt5/train_byt5.py \
   --gradient_accumulation_steps 1 \
   --learning_rate 1e-4 \
   --oversample_abbr 2.0 \
+  --max_input_length 256 \
   --lang_prefix \
   --use_cache

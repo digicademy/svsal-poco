@@ -228,6 +228,12 @@ def main():
     args = parse_args()
     random.seed(args.seed)
 
+    # Login to HugingFace Hub
+    use_hub = args.output_repo is not None
+    if args.hf_token and (args.dataset_repo or use_hub):
+        login(token=args.hf_token)
+        api = HfApi()
+
     # --- Fail fast if GPU requested but unavailable ---
     if args.bf16 or args.fp16:
         if not torch.cuda.is_available():
@@ -243,7 +249,6 @@ def main():
         data_path = args.dataset_local
         print(f"Local mode: reading from {data_path}")
     elif args.dataset_repo:
-        login(token=args.hf_token)
         data_path = hf_hub_download(
             repo_id=args.dataset_repo,
             filename="data.jsonl",
@@ -255,10 +260,6 @@ def main():
     use_hub    = args.output_repo is not None
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    if use_hub:
-        login(token=args.hf_token)
-        api = HfApi()
 
     # --- Data, tokenizer, model (unchanged) ---
     lines    = load_and_sort_lines(data_path)

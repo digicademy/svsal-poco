@@ -25,12 +25,14 @@ hf jobs uv run \
       --output_repo  mpilhlt/byt5-salamanca-abbr \
       --wandb_project byt5-salamanca-abbr \
       --wandb_entity mpilhlt \
-      --tokenizer_num_proc 16 \
       --epochs 10 \
-      --batch_size 64 \
-      --gradient_accumulation_steps 2 \
       --learning_rate 1e-4 \
       --oversample_abbr 2.0 \
+      --batch_size 64 \
+      --gradient_accumulation_steps 2 \
+      --max_input_length 256 \
+      --max_target_length 256 \
+      --tokenizer_num_proc 16 \
       --bf16 \
       --use_cache \
       --lang_prefix
