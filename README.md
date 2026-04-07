@@ -14,6 +14,7 @@ abbr-expansion/
 │   │   ├── scripts/
 │   │   │   └── *              # Various scripts to transform TEI XML to jsonl
 │   │   └── runme.sh           # Commands and explanation to prepare training data
+│   ├── check_data.py          # Profile length of lines in dataset
 │   └── data_utils.py          # Shared: loading, sorting, example construction
 ├── evaluation/
 │   └── evaluation.py          # Span-level CER, exact match, type breakdown
