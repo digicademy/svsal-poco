@@ -370,13 +370,19 @@ def main():
     checkpoints_dir = output_dir / "checkpoints"
     training_kwargs = dict(
         output_dir=str(checkpoints_dir),
+
+        warmup_steps=500,
+        dataloader_num_workers=4,
+        dataloader_prefetch_factor=2,
+        lr_scheduler_type="cosine",
+        weight_decay=0.01,
+        predict_with_generate=True,
+
+        generation_max_length=args.max_target_length,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
-        warmup_steps=500,
         learning_rate=args.learning_rate,
-        lr_scheduler_type="cosine",
-        weight_decay=0.01,
 
         bf16=args.bf16, # Mixed precision to save memory, as configured in command-line
         fp16=args.fp16, # A10G support bf16; use fp16=True if not available
@@ -385,9 +391,6 @@ def main():
         # an effective batch size of at least 16
         # (gradient_accumulation_steps * batch_size = effective batch size)
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-
-        predict_with_generate=True,
-        generation_max_length=args.max_target_length,
 
         # Use span CER as the model selection criterion —
         # this focuses early stopping on expansion quality,
@@ -408,7 +411,7 @@ def main():
         hub_model_id=args.output_repo if use_hub else None,
     )
     if use_hub:
-        training_kwargs["hub_strategy"] = "every_save"
+        training_kwargs["hub_strategy"] = "end" # for reliability reasons, we changed this from "every_save" to "end" to avoid issues with intermittent Hub connectivity during training. This means the model will only be pushed to the Hub at the end of training, not after every checkpoint.
     training_args = Seq2SeqTrainingArguments(**training_kwargs)
 
     trainer = Seq2SeqTrainer(
