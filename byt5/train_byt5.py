@@ -486,7 +486,7 @@ def main():
 
         seed=args.seed,
         logging_steps=100,
-        report_to=["wandb", "tensorboard"],
+        report_to="all",  # log to both console and WandB (if initialized)
         dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
 
         # Hub integration only when use_hub is True
@@ -494,13 +494,11 @@ def main():
         hub_model_id=args.output_repo if use_hub else None,
     )
     if use_hub:
-        training_kwargs["hub_strategy"] = "end" # for reliability reasons, we changed this from "every_save" to "end" to avoid issues with intermittent Hub connectivity during training. This means the model will only be pushed to the Hub at the end of training, not after every checkpoint.
+        training_kwargs["hub_strategy"] = "checkpoint"
     training_args = Seq2SeqTrainingArguments(**training_kwargs)
 
-    callbacks = [
-        EarlyStoppingCallback(early_stopping_patience=3),
-        # CarbonTrackerCallback(str(output_dir)),
-    ]
+    # callbacks = 
+
     # if use_hub:
     #     callbacks.append(PeriodicHubUploadCallback(
     #         output_dir=str(output_dir),
@@ -517,7 +515,10 @@ def main():
         eval_dataset=tokenized["val"],
         data_collator=collator,
         compute_metrics=compute_metrics,
-        callbacks=callbacks,
+        callbacks=[
+            EarlyStoppingCallback(early_stopping_patience=3),
+            # CarbonTrackerCallback(str(output_dir)),
+        ],
     )
 
     # --- Initialize WandB run (optional, but recommended for rich logging and visualization) ---
