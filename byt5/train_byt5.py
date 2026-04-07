@@ -84,6 +84,7 @@ def parse_args():
     p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
     p.add_argument("--bf16",              action="store_true", help="Use bf16 mixed precision (A10G support; requires compatible GPU and drivers)")
     p.add_argument("--fp16",              action="store_true", help="Use fp16 mixed precision (for GPUs without bf16 support; requires compatible GPU and drivers)")
+    p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
     return p.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -330,6 +331,7 @@ def main():
         tokenized = raw.map(
             tokenize_fn,
             batched=True,
+            num_proc=args.tokenizer_num_proc, # use multiple available CPU threads for faster tokenization
             remove_columns=["source", "target", "has_abbr", "doc_id", "lang"],
         )
     print(f"Tokenized dataset: {tokenized}")
