@@ -169,16 +169,17 @@ def timeout(seconds: int):
 class PeriodicHubUploadCallback(TrainerCallback):
     def __init__(
         self,
-        output_dir:    str,
-        repo_id:       str,
+        output_dir:     str,
+        repo_id:        str,
+        api:            HfApi,        # pass in existing instance
         every_n_epochs: int = 1,
-        timeout_secs:  int = 300,   # 5 minutes max per upload
+        timeout_secs:   int = 300,
     ):
-        self.output_dir    = Path(output_dir)
-        self.repo_id       = repo_id
-        self.every_n       = every_n_epochs
-        self.timeout_secs  = timeout_secs
-        self.api           = HfApi()
+        self.output_dir   = Path(output_dir)
+        self.repo_id      = repo_id
+        self.api          = api       # reuse rather than recreate
+        self.every_n      = every_n_epochs
+        self.timeout_secs = timeout_secs
 
     def on_epoch_end(self, args, state, control, **kwargs):
         if not (state.epoch and int(state.epoch) % self.every_n == 0):
@@ -366,22 +367,6 @@ def main():
     )
     print(f"Model loaded: {args.model_name}")
 
-    # HuggingFace Datasets
-    def to_hf_dataset(exs):
-        return Dataset.from_dict({
-            "source":   [e["source"]   for e in exs],
-            "target":   [e["target"]   for e in exs],
-            "has_abbr": [e["has_abbr"] for e in exs],
-            "doc_id":   [e["doc_id"]   for e in exs],
-            "lang":     [e["lang"]     for e in exs],
-        })
-
-    raw = DatasetDict({
-        "train": to_hf_dataset(train_ex),
-        "val":   to_hf_dataset(val_ex),
-        "test":  to_hf_dataset(test_ex),
-    })
-
     cache_path = output_dir / "tokenized_cache"
 
     # Try to download cache from Hub if not present locally
@@ -514,12 +499,13 @@ def main():
 
     callbacks = [
         EarlyStoppingCallback(early_stopping_patience=3),
-        CarbonTrackerCallback(str(output_dir)),
+        # CarbonTrackerCallback(str(output_dir)),
     ]
     # if use_hub:
     #     callbacks.append(PeriodicHubUploadCallback(
     #         output_dir=str(output_dir),
     #         repo_id=args.output_repo,
+    #         api=api,
     #         every_n_epochs=1,
     #     ))
 
