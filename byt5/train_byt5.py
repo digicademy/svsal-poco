@@ -332,13 +332,18 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Data, tokenizer, model (unchanged) ---
+    print("Loading lines...")
     lines    = load_and_sort_lines(data_path)
+    print(f"Loaded {len(lines)} lines from {data_path}")
+    print("Building examples...")
     examples = build_byt5_examples(
         lines,
         oversample_abbr=args.oversample_abbr,
         lang_prefix=args.lang_prefix,
         seed=args.seed,
     )
+    print(f"Built {len(examples)} examples")
+    print("Splitting dataset...")
     train_ex, val_ex, test_ex = document_split(examples, seed=args.seed)
     print(f"Train: {len(train_ex)} | Val: {len(val_ex)} | Test: {len(test_ex)}")
 
@@ -352,11 +357,14 @@ def main():
         print("Warning: empty test set, using full dataset for evaluation")
         test_ex = examples
 
+    print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    print("Loading model...")
     model     = T5ForConditionalGeneration.from_pretrained(
         args.model_name,
         tie_word_embeddings=False,
     )
+    print(f"Model loaded: {args.model_name}")
 
     # HuggingFace Datasets
     def to_hf_dataset(exs):
@@ -375,6 +383,8 @@ def main():
     })
 
     cache_path = output_dir / "tokenized_cache"
+
+    # Try to download cache from Hub if not present locally
     if args.use_cache and not cache_path.exists() and use_hub:
         try:
             print("Downloading tokenized cache from Hub...")
@@ -391,10 +401,28 @@ def main():
                 print("No cached tokenization found on Hub, will tokenize from scratch.")
         except Exception as e:
             print(f"Cache download failed ({e}), will tokenize from scratch.")
+
     if args.use_cache and cache_path.exists():
         print("Loading tokenized dataset from cache...")
         tokenized = DatasetDict.load_from_disk(str(cache_path))
     else:
+        # Only build raw dataset if we actually need to tokenize
+        print("Building raw dataset for tokenization...")
+        def to_hf_dataset(exs):
+            return Dataset.from_dict({
+                "source":   [e["source"]   for e in exs],
+                "target":   [e["target"]   for e in exs],
+                "has_abbr": [e["has_abbr"] for e in exs],
+                "doc_id":   [e["doc_id"]   for e in exs],
+                "lang":     [e["lang"]     for e in exs],
+            })
+
+        raw = DatasetDict({
+            "train": to_hf_dataset(train_ex),
+            "val":   to_hf_dataset(val_ex),
+            "test":  to_hf_dataset(test_ex),
+        })
+
         print("Tokenizing dataset...")
         tokenize_fn = make_tokenize_fn(
             tokenizer, args.max_input_length, args.max_target_length
@@ -422,6 +450,7 @@ def main():
                     print(f"Warning: cache upload failed ({e}). Training will continue.")
         else:
             print("Tokenized dataset not cached (use --use_cache to enable caching)")
+
     print(f"Tokenized dataset: {tokenized}")
 
     # Data collator — pads per batch rather than globally
