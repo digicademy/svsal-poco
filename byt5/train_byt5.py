@@ -516,12 +516,12 @@ def main():
         EarlyStoppingCallback(early_stopping_patience=3),
         CarbonTrackerCallback(str(output_dir)),
     ]
-    if use_hub:
-        callbacks.append(PeriodicHubUploadCallback(
-            output_dir=str(output_dir),
-            repo_id=args.output_repo,
-            every_n_epochs=1,
-        ))
+    # if use_hub:
+    #     callbacks.append(PeriodicHubUploadCallback(
+    #         output_dir=str(output_dir),
+    #         repo_id=args.output_repo,
+    #         every_n_epochs=1,
+    #     ))
 
     print("Initializing Trainer...")
     trainer = Seq2SeqTrainer(
