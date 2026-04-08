@@ -497,16 +497,6 @@ def main():
         training_kwargs["hub_strategy"] = "checkpoint"
     training_args = Seq2SeqTrainingArguments(**training_kwargs)
 
-    # callbacks = 
-
-    # if use_hub:
-    #     callbacks.append(PeriodicHubUploadCallback(
-    #         output_dir=str(output_dir),
-    #         repo_id=args.output_repo,
-    #         api=api,
-    #         every_n_epochs=1,
-    #     ))
-
     print("Initializing Trainer...")
     trainer = Seq2SeqTrainer(
         model=model,
@@ -518,6 +508,15 @@ def main():
         callbacks=[
             EarlyStoppingCallback(early_stopping_patience=3),
             # CarbonTrackerCallback(str(output_dir)),
+            *(
+                [PeriodicHubUploadCallback(
+                    output_dir=str(output_dir),
+                    repo_id=args.output_repo,
+                    api=api,
+                    every_n_epochs=1,
+                )]
+                if use_hub else []
+            ),
         ],
     )
 
