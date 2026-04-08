@@ -28,7 +28,8 @@ hf jobs uv run \
       --epochs 10 \
       --learning_rate 1e-4 \
       --oversample_abbr 2.0 \
-      --batch_size 64 \
+      --train_batch_size 64 \
+      --eval_batch_size 128 \
       --gradient_accumulation_steps 2 \
       --max_input_length 256 \
       --max_target_length 256 \

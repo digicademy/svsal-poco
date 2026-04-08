@@ -71,7 +71,8 @@ def parse_args():
     p.add_argument("--output_repo",       default=None, help="HF model repo (omit for local testing)")
     p.add_argument("--output_dir",        default="./boundary-classifier-output", help="Local output directory (for local testing mode)")
     p.add_argument("--epochs",            type=int,   default=10)
-    p.add_argument("--batch_size",        type=int,   default=16)
+    p.add_argument("--train_batch_size",  type=int,   default=16)
+    p.add_argument("--eval_batch_size",   type=int,   default=128)
     p.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients for (to achieve larger effective batch size on limited VRAM)")
     p.add_argument("--learning_rate",     type=float, default=1e-4)
     p.add_argument("--max_input_length",  type=int,   default=512)
@@ -463,8 +464,7 @@ def main():
 
         generation_max_length=args.max_target_length,
         num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
+        per_device_train_batch_size=args.train_batch_size,
         learning_rate=args.learning_rate,
 
         bf16=args.bf16, # Mixed precision to save memory, as configured in command-line
@@ -478,8 +478,11 @@ def main():
         # Use span CER as the model selection criterion —
         # this focuses early stopping on expansion quality,
         # not copying fidelity
-        eval_strategy="epoch",
-        save_strategy="epoch",
+        per_device_eval_batch_size=args.eval_batch_size,
+        eval_strategy="steps",
+        eval_steps=5000,
+        save_strategy="steps",
+        save_steps=5000,
         load_best_model_at_end=True,
         metric_for_best_model="span_cer",
         greater_is_better=False,
@@ -502,7 +505,8 @@ def main():
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
-        eval_dataset=tokenized["val"],
+        # eval_dataset=tokenized["val"],
+        eval_dataset=tokenized["val"].select(range(min(10000, len(tokenized["val"])))),
         data_collator=collator,
         compute_metrics=compute_metrics,
         callbacks=[
