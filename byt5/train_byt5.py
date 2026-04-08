@@ -530,7 +530,7 @@ def main():
     wandb.init(
         project=args.wandb_project,
         entity=args.wandb_entity,   # None means wandb uses your default entity
-        name=f"byt5-base-{args.epochs}ep-bs{args.batch_size}",
+        name=f"byt5-base-{args.epochs}ep-bs{args.train_batch_size}",
         config=vars(args),
     )
 
