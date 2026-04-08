@@ -249,6 +249,7 @@ def make_compute_metrics(tokenizer, val_sources):
             marked_inputs=val_sources,
             model_outputs=decoded_preds,
             target_corrs=decoded_labels,
+            include_breakdown=False,   # skip expensive breakdown during training
         )
 
         return {
@@ -554,6 +555,7 @@ def main():
         marked_inputs=test_sources,
         model_outputs=test_preds,
         target_corrs=test_targets,
+        include_breakdown=True,   # include breakdown for final test evaluation
     )
 
     print(f"\nTest span CER:         {test_metrics['span_cer']:.4f}")

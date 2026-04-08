@@ -131,6 +131,7 @@ def compute_span_cer(
     marked_inputs: list[str],
     model_outputs: list[str],
     target_corrs:  list[str],
+    include_breakdown: bool = True,
 ) -> dict:
     """
     Compute evaluation metrics over abbreviated spans and full lines.
@@ -196,7 +197,7 @@ def compute_span_cer(
         "span_exact_match": n_exact / n_spans,
         "n_spans":          n_spans,
         "n_exact":          n_exact,
-        "by_abbr_type":     build_type_breakdown(results),
+        "by_abbr_type":     build_type_breakdown(results) if include_breakdown else {},
     }
 
 
