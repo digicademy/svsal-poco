@@ -115,6 +115,18 @@ def extract_predicted_spans(
 # Metrics
 # ---------------------------------------------------------------------------
 
+def extract_cer(result) -> float:
+    """Extract CER float from cer_metric.compute() result regardless of return type."""
+    if result is None:
+        return 0.0
+    elif isinstance(result, float):
+        return result
+    elif isinstance(result, dict) and "cer" in result:
+        return float(result["cer"])
+    else:
+        return 0.0
+
+
 def compute_span_cer(
     marked_inputs: list[str],
     model_outputs: list[str],
@@ -164,19 +176,17 @@ def compute_span_cer(
     n_exact = sum(r.exact for r in results)
 
     try:
-        span_cer_result = cer_metric.compute(predictions=pred_all, references=gold_all)
-        span_cer: float = float(span_cer_result["cer"]) if span_cer_result else 0.0
+        span_cer: float = extract_cer(cer_metric.compute(predictions=pred_all, references=gold_all))
     except ZeroDivisionError:
         span_cer = 0.0
 
     # Full-line CER is computed on a sample to avoid hanging on large val sets
     max_cer_samples = 10000
     try:
-        full_line_cer_result = cer_metric.compute(
+        full_line_cer: float = extract_cer(cer_metric.compute(
             predictions=model_outputs[:max_cer_samples],
             references=target_corrs[:max_cer_samples],
-        )
-        full_line_cer: float = float(full_line_cer_result["cer"]) if full_line_cer_result else 0.0
+        ))
     except ZeroDivisionError:
         full_line_cer = 0.0
 
@@ -188,6 +198,7 @@ def compute_span_cer(
         "n_exact":          n_exact,
         "by_abbr_type":     build_type_breakdown(results),
     }
+
 
 def build_type_breakdown(results: list[SpanResult]) -> dict:
     """
@@ -217,8 +228,7 @@ def build_type_breakdown(results: list[SpanResult]) -> dict:
 
         # Guard against empty strings causing ZeroDivisionError in CER
         try:
-            type_cer_result = cer_metric.compute(predictions=preds, references=golds)
-            type_cer: float = float(type_cer_result["cer"]) if type_cer_result else 0.0
+            type_cer: float = extract_cer(cer_metric.compute(predictions=preds, references=golds))
         except ZeroDivisionError:
             type_cer = 0.0
 
