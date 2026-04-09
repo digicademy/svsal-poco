@@ -7,12 +7,15 @@ import evaluate as hf_evaluate
 from dataclasses import dataclass
 from collections import defaultdict, Counter
 from typing import Optional
+from datetime import datetime
 
 cer_metric = hf_evaluate.load("cer")
 
 ABBR_OPEN  = "⦃"
 ABBR_CLOSE = "⦄"
 
+def _ts():
+    return datetime.now().strftime("%H:%M:%S")
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -128,10 +131,11 @@ def extract_cer(result) -> float:
 
 
 def compute_span_cer(
-    marked_inputs: list[str],
-    model_outputs: list[str],
-    target_corrs:  list[str],
+    marked_inputs:     list[str],
+    model_outputs:     list[str],
+    target_corrs:      list[str],
     include_breakdown: bool = True,
+    max_source_lines:  int | None = None,   # None = no cap, process all
 ) -> dict:
     """
     Compute evaluation metrics over abbreviated spans and full lines.
@@ -143,11 +147,20 @@ def compute_span_cer(
         n_spans:           total number of spans evaluated
         n_exact:           raw count of exactly correct spans
         by_abbr_type:      per-abbreviation-type breakdown dict
+        source_cap:        max_source_lines value used (for reporting)
     """
+
+    # Apply cap if specified
+    if max_source_lines is not None:
+        marked_inputs = marked_inputs[:max_source_lines]
+        model_outputs = model_outputs[:max_source_lines]
+        target_corrs  = target_corrs[:max_source_lines]
+
     gold_all  = []
     pred_all  = []
     results   = []
 
+    print(f"[{_ts()}] compute_span_cer: starting span alignment loop over {len(marked_inputs)} inputs ...")
     for marked, output, target in zip(marked_inputs, model_outputs, target_corrs):
         if ABBR_OPEN not in marked:
             continue
@@ -162,9 +175,11 @@ def compute_span_cer(
                 predicted=p,
                 exact=(p == a.expanded_text),
             ))
+    print(f"[{_ts()}] compute_span_cer: span alignment done, {len(pred_all)} spans found.")
 
     n_spans = len(gold_all)
     if n_spans == 0:
+        print(f"[{_ts()}] compute_span_cer: no spans found, returning early")
         return {
             "span_cer":         None,
             "full_line_cer":    None,
@@ -176,20 +191,25 @@ def compute_span_cer(
 
     n_exact = sum(r.exact for r in results)
 
+    print(f"[{_ts()}] compute_span_cer: exact match computed, starting span CER over {n_spans} spans ...")
     try:
-        span_cer: float = extract_cer(cer_metric.compute(predictions=pred_all, references=gold_all))
+        span_cer_result = cer_metric.compute(
+            predictions=pred_all,
+            references=gold_all,
+        )
+        span_cer = extract_cer(span_cer_result) if span_cer_result else 0.0
     except ZeroDivisionError:
         span_cer = 0.0
-
-    # Full-line CER is computed on a sample to avoid hanging on large val sets
-    max_cer_samples = 10000
+    print(f"[{_ts()}] compute_span_cer: span CER done ({span_cer:.4f}). Starting full-line CER over {len(model_outputs)} lines...")
     try:
-        full_line_cer: float = extract_cer(cer_metric.compute(
-            predictions=model_outputs[:max_cer_samples],
-            references=target_corrs[:max_cer_samples],
-        ))
+        full_line_cer_result = cer_metric.compute(
+            predictions=model_outputs,
+            references=target_corrs,
+        )
+        full_line_cer = extract_cer(full_line_cer_result) if full_line_cer_result else 0.0
     except ZeroDivisionError:
         full_line_cer = 0.0
+    print(f"cer_metric.compute() done. Span CER: {span_cer:.4f}, Full Line CER: {full_line_cer:.4f}, Exact Match: {n_exact}/{n_spans} ({n_exact/n_spans:.2%})")
 
     return {
         "span_cer":         span_cer,
@@ -198,6 +218,7 @@ def compute_span_cer(
         "n_spans":          n_spans,
         "n_exact":          n_exact,
         "by_abbr_type":     build_type_breakdown(results) if include_breakdown else {},
+        "source_cap":       max_source_lines if max_source_lines is not None else "None",
     }
 
 

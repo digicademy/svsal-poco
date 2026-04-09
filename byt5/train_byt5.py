@@ -29,6 +29,7 @@ import argparse
 from pathlib import Path
 import signal
 from contextlib import contextmanager
+from datetime import datetime
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -52,11 +53,14 @@ from codecarbon import EmissionsTracker
 from transformers import TrainerCallback
 
 from data.data_utils import load_and_sort_lines, build_byt5_examples, document_split
-from evaluation.evaluation import compute_span_cer
+from evaluation.evaluation import compute_span_cer, extract_cer
 
 cer_metric = hf_evaluate.load("cer")
 
 ABBR_OPEN = "⦃"
+
+def _ts():
+    return datetime.now().strftime("%H:%M:%S")
 
 
 # ---------------------------------------------------------------------------
@@ -71,12 +75,15 @@ def parse_args():
     p.add_argument("--output_repo",       default=None, help="HF model repo (omit for local testing)")
     p.add_argument("--output_dir",        default="./boundary-classifier-output", help="Local output directory (for local testing mode)")
     p.add_argument("--epochs",            type=int,   default=10)
+    p.add_argument("--eval_strategy",     default="steps", choices=["no", "epoch", "steps"])
+    p.add_argument("--eval_steps",        type=int,   default=5000)
     p.add_argument("--train_batch_size",  type=int,   default=16)
     p.add_argument("--eval_batch_size",   type=int,   default=128)
     p.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients for (to achieve larger effective batch size on limited VRAM)")
     p.add_argument("--learning_rate",     type=float, default=1e-4)
     p.add_argument("--max_input_length",  type=int,   default=512)
     p.add_argument("--max_target_length", type=int,   default=512)
+    p.add_argument("--cap_eval",          type=int,   default=None, help="Max number of samples to evaluate during training (to speed up compute_metrics on large val sets)")
     p.add_argument("--oversample_abbr",   type=float, default=2.0)
     p.add_argument("--lang_prefix",       action="store_true")
     p.add_argument("--seed",              type=int,   default=42)
@@ -214,7 +221,7 @@ class PeriodicHubUploadCallback(TrainerCallback):
 # compute_metrics callback
 # ---------------------------------------------------------------------------
 
-def make_compute_metrics(tokenizer, val_sources):
+def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
     """
     Returns a compute_metrics function for Seq2SeqTrainer.
 
@@ -225,32 +232,45 @@ def make_compute_metrics(tokenizer, val_sources):
     Note: assumes single-GPU training (Trainer preserves val set order).
     For multi-GPU, disable span metrics during training and run post-hoc.
     """
+
+    if cap_eval is None:
+        cap_eval = len(val_sources)
+
     def compute_metrics(eval_preds):
+
         preds, labels = eval_preds
         if isinstance(preds, tuple):
             preds = preds[0]
 
+        print(f"[{_ts()}] compute_metrics: decoding {len(preds)} predictions ...")
         decoded_preds, decoded_labels = decode_predictions(
             tokenizer, preds, labels
         )
 
+        print(f"[{_ts()}] compute_metrics: decoding done. Starting full-line CER ...")
         # Sample to avoid jiwer hanging on large val sets
-        max_cer_samples = 10000
         try:
             full_line_cer_result = cer_metric.compute(
-                predictions=decoded_preds[:max_cer_samples],
-                references=decoded_labels[:max_cer_samples],
+                predictions=decoded_preds[:cap_eval],
+                references=decoded_labels[:cap_eval],
             )
-            full_line_cer: float = float(full_line_cer_result["cer"]) if full_line_cer_result else 0.0
+            full_line_cer = extract_cer(full_line_cer_result) if full_line_cer_result else 0.0
         except ZeroDivisionError:
             full_line_cer = 0.0
 
+        # Cap val_sources to match decoded_preds length
+        # to avoid passing 314k sources when only 10k were evaluated
+        capped_val_sources = val_sources[:len(decoded_preds)]
+        print(f"[{_ts()}] compute_metrics: full-line CER done ({full_line_cer:.4f}). Starting span CER over {len(capped_val_sources)} sources ...")
+
         span_results = compute_span_cer(
-            marked_inputs=val_sources,
+            marked_inputs=capped_val_sources,
             model_outputs=decoded_preds,
             target_corrs=decoded_labels,
             include_breakdown=False,   # skip expensive breakdown during training
+            max_source_lines=cap_eval,
         )
+        print(f"[{_ts()}] compute_metrics: span CER done, returning metrics")
 
         return {
             "full_line_cer":    round(full_line_cer, 4),
@@ -451,7 +471,7 @@ def main():
 
     # Metrics closure over val sources
     val_sources     = [e["source"] for e in val_ex]
-    compute_metrics = make_compute_metrics(tokenizer, val_sources)
+    compute_metrics = make_compute_metrics(tokenizer, val_sources, args.cap_eval)
 
     # --- Training arguments: checkpoints go into output_dir/checkpoints ---
     checkpoints_dir = output_dir / "checkpoints"
@@ -479,13 +499,13 @@ def main():
         # Use span CER as the model selection criterion —
         # this focuses early stopping on expansion quality,
         # not copying fidelity
-        per_device_eval_batch_size=args.eval_batch_size,
-        eval_strategy="steps",
-        eval_steps=5000,
-        save_strategy="steps",
-        save_steps=5000,
-        load_best_model_at_end=True,
         metric_for_best_model="span_cer",
+        per_device_eval_batch_size=args.eval_batch_size,
+        eval_strategy=args.eval_strategy,
+        eval_steps=args.eval_steps,
+        save_strategy=args.eval_strategy,  # checkpoint at same frequency as eval
+        save_steps=args.eval_steps,
+        load_best_model_at_end=True,
         greater_is_better=False,
 
         seed=args.seed,
@@ -556,6 +576,7 @@ def main():
         model_outputs=test_preds,
         target_corrs=test_targets,
         include_breakdown=True,   # include breakdown for final test evaluation
+        max_source_lines=None,    # process everything for the final evaluation
     )
 
     print(f"\nTest span CER:         {test_metrics['span_cer']:.4f}")

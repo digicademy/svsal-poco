@@ -30,6 +30,9 @@ hf jobs uv run \
       --oversample_abbr 2.0 \
       --train_batch_size 64 \
       --eval_batch_size 128 \
+      --eval_strategy "steps" \
+      --eval_steps 5000 \
+      --cap_eval         10000 \
       --gradient_accumulation_steps 2 \
       --max_input_length 256 \
       --max_target_length 256 \
