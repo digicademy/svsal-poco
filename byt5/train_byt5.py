@@ -43,7 +43,7 @@ from transformers import (
     AutoTokenizer,
     T5ForConditionalGeneration,
     DataCollatorForSeq2Seq,
-    Seq2SeqTrainer,
+#    Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     EarlyStoppingCallback,
 )
@@ -54,6 +54,7 @@ from transformers import TrainerCallback
 
 from data.data_utils import load_and_sort_lines, build_byt5_examples, document_split
 from evaluation.evaluation import compute_span_cer, extract_cer
+from evaluation.streaming_eval_trainer import StreamingEvalTrainer
 
 cer_metric = hf_evaluate.load("cer")
 
@@ -83,7 +84,7 @@ def parse_args():
     p.add_argument("--learning_rate",     type=float, default=1e-4)
     p.add_argument("--max_input_length",  type=int,   default=512)
     p.add_argument("--max_target_length", type=int,   default=512)
-    p.add_argument("--cap_eval",          type=int,   default=None, help="Max number of samples to evaluate during training (to speed up compute_metrics on large val sets)")
+    p.add_argument("--cap_eval",          type=int,   default=None, help="Max number of samples to evaluate during training (to speed up metrics on large val sets)")
     p.add_argument("--oversample_abbr",   type=float, default=2.0)
     p.add_argument("--lang_prefix",       action="store_true")
     p.add_argument("--seed",              type=int,   default=42)
@@ -215,71 +216,6 @@ class PeriodicHubUploadCallback(TrainerCallback):
             print(f"Warning: {e} — skipping checkpoint upload, training continues.")
         except Exception as e:
             print(f"Warning: checkpoint upload failed ({e}) — training continues.")
-
-
-# ---------------------------------------------------------------------------
-# compute_metrics callback
-# ---------------------------------------------------------------------------
-
-def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
-    """
-    Returns a compute_metrics function for Seq2SeqTrainer.
-
-    val_sources: the marked input strings for the val set, captured in
-    a closure. Used to compute span-level CER during validation without
-    threading extra state through the Trainer API.
-
-    Note: assumes single-GPU training (Trainer preserves val set order).
-    For multi-GPU, disable span metrics during training and run post-hoc.
-    """
-
-    if cap_eval is None:
-        cap_eval = len(val_sources)
-
-    def compute_metrics(eval_preds):
-
-        preds, labels = eval_preds
-        if isinstance(preds, tuple):
-            preds = preds[0]
-
-        print(f"[{_ts()}] compute_metrics: decoding {len(preds)} predictions ...")
-        decoded_preds, decoded_labels = decode_predictions(
-            tokenizer, preds, labels
-        )
-
-        print(f"[{_ts()}] compute_metrics: decoding done. Starting full-line CER ...")
-        # Sample to avoid jiwer hanging on large val sets
-        try:
-            full_line_cer_result = cer_metric.compute(
-                predictions=decoded_preds[:cap_eval],
-                references=decoded_labels[:cap_eval],
-            )
-            full_line_cer = extract_cer(full_line_cer_result) if full_line_cer_result else 0.0
-        except ZeroDivisionError:
-            full_line_cer = 0.0
-
-        # Cap val_sources to match decoded_preds length
-        # to avoid passing 314k sources when only 10k were evaluated
-        capped_val_sources = val_sources[:len(decoded_preds)]
-        print(f"[{_ts()}] compute_metrics: full-line CER done ({full_line_cer:.4f}). Starting span CER over {len(capped_val_sources)} sources ...")
-
-        span_results = compute_span_cer(
-            marked_inputs=capped_val_sources,
-            model_outputs=decoded_preds,
-            target_corrs=decoded_labels,
-            include_breakdown=False,   # skip expensive breakdown during training
-            max_source_lines=cap_eval,
-        )
-        print(f"[{_ts()}] compute_metrics: span CER done, returning metrics")
-
-        return {
-            "full_line_cer":    round(full_line_cer, 4),
-            "span_cer":         round(span_results["span_cer"] or 0.0, 4),
-            "span_exact_match": round(span_results["span_exact_match"] or 0.0, 4),
-            "n_spans":          span_results["n_spans"],
-        }
-
-    return compute_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +407,6 @@ def main():
 
     # Metrics closure over val sources
     val_sources     = [e["source"] for e in val_ex]
-    compute_metrics = make_compute_metrics(tokenizer, val_sources, args.cap_eval)
 
     # --- Training arguments: checkpoints go into output_dir/checkpoints ---
     checkpoints_dir = output_dir / "checkpoints"
@@ -499,7 +434,7 @@ def main():
         # Use span CER as the model selection criterion —
         # this focuses early stopping on expansion quality,
         # not copying fidelity
-        metric_for_best_model="span_cer",
+        metric_for_best_model="eval_span_cer",
         per_device_eval_batch_size=args.eval_batch_size,
         eval_strategy=args.eval_strategy,
         eval_steps=args.eval_steps,
@@ -522,14 +457,15 @@ def main():
     training_args = Seq2SeqTrainingArguments(**training_kwargs)
 
     print("Initializing Trainer...")
-    trainer = Seq2SeqTrainer(
+    trainer = StreamingEvalTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
-        # eval_dataset=tokenized["val"],
         eval_dataset=tokenized["val"].select(range(min(10000, len(tokenized["val"])))),
         data_collator=collator,
-        compute_metrics=compute_metrics,
+        val_sources=val_sources,       # new kwarg
+        cap_eval=args.cap_eval,        # new kwarg
+        # compute_metrics is gone — handled internally
         callbacks=[
             EarlyStoppingCallback(early_stopping_patience=3),
             # CarbonTrackerCallback(str(output_dir)),

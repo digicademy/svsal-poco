@@ -64,12 +64,22 @@ def extract_span_alignments(
     handling variable-length expansions correctly.
     """
     alignments = []
+
+    if ABBR_OPEN not in marked_input:
+        return alignments
+
     i          = 0
     out_offset = 0
 
     while i < len(marked_input):
         if marked_input[i] == ABBR_OPEN:
-            close     = marked_input.index(ABBR_CLOSE, i)
+            try:
+                close = marked_input.index(ABBR_CLOSE, i)
+            except ValueError:
+                # Malformed input: opening delimiter without closing one
+                # Skip the rest of this line
+                break
+
             abbr_text = marked_input[i+1:close]
             after     = marked_input[close+1:close+6]   # 5-char lookahead
 

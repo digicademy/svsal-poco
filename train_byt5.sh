@@ -35,7 +35,7 @@ hf jobs uv run \
       --cap_eval         10000 \
       --gradient_accumulation_steps 2 \
       --max_input_length 256 \
-      --max_target_length 256 \
+      --max_target_length 192 \
       --tokenizer_num_proc 16 \
       --bf16 \
       --use_cache \
