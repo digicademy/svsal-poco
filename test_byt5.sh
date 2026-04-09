@@ -5,7 +5,7 @@ head -20000 data/data.jsonl > data/evaltest.jsonl
 
 CUDA_VISIBLE_DEVICES="" WANDB_MODE=disabled python byt5/train_byt5.py \
   --dataset_local data/evaltest.jsonl
-  --output_dir       ./test-output-byt5 \
+  --output_dir       ./test_output_byt5 \
   --epochs           1 \
   --batch_size       4 \
   --eval_batch_size  8 \

@@ -73,7 +73,7 @@ def parse_args():
     p.add_argument("--dataset_repo",      default=None, help="HF dataset repo id (for Hub/Jobs mode)")
     p.add_argument("--dataset_local",     default=None, help="Local JSONL path (for local testing mode)")
     p.add_argument("--output_repo",       default=None, help="HF model repo (omit for local testing)")
-    p.add_argument("--output_dir",        default="./boundary-classifier-output", help="Local output directory (for local testing mode)")
+    p.add_argument("--output_dir",        default="./boundary_classifier_output", help="Local output directory (for local testing mode)")
     p.add_argument("--epochs",            type=int,   default=10)
     p.add_argument("--eval_strategy",     default="steps", choices=["no", "epoch", "steps"])
     p.add_argument("--eval_steps",        type=int,   default=5000)
