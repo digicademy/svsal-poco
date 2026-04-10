@@ -8,14 +8,18 @@
 # prediction-gathering (pad-to-max + numpy concatenation) causes memory
 # pressure and swap thrashing on HF Jobs.
 
+from __future__ import annotations
+
+from typing import Any, Optional, Union
+
 import numpy as np
 import torch
 from datetime import datetime
-from transformers import Seq2SeqTrainer
+from transformers import Seq2SeqTrainer, PreTrainedTokenizerBase
+from torch.utils.data import Dataset
 from evaluation.evaluation import (
     extract_span_alignments,
     extract_predicted_spans,
-    SpanResult,
     extract_cer,
     ABBR_OPEN,
 )
@@ -24,7 +28,7 @@ import evaluate as hf_evaluate
 cer_metric = hf_evaluate.load("cer")
 
 
-def _ts():
+def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
@@ -46,7 +50,13 @@ class StreamingEvalTrainer(Seq2SeqTrainer):
     the final trainer.predict() call on the test set.
     """
 
-    def __init__(self, *args, val_sources: list[str], cap_eval: int | None = None, **kwargs):
+    def __init__(
+        self,
+        *args: Any,
+        val_sources: list[str],
+        cap_eval: Optional[int] = None,
+        **kwargs: Any,
+    ):
         # Remove compute_metrics — we handle it ourselves during evaluate()
         kwargs.pop("compute_metrics", None)
         super().__init__(*args, **kwargs)
@@ -54,18 +64,26 @@ class StreamingEvalTrainer(Seq2SeqTrainer):
         self._cap_eval = cap_eval
 
     # ------------------------------------------------------------------
-    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+    def evaluate(                                       # type: ignore[override]
+        self,
+        eval_dataset: Optional[Union[Dataset, Any]] = None,
+        ignore_keys: Optional[list[str]] = None,
+        metric_key_prefix: str = "eval",
+        **gen_kwargs: Any,
+    ) -> dict[str, float]:
         """
         Streaming evaluation: iterate over the eval DataLoader, generate
         predictions batch-by-batch, decode immediately, and accumulate
         span-level and full-line CER metrics without storing all
         predictions in memory.
         """
-        eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
-        dataloader = self.get_eval_dataloader(eval_dataset)
+        ds: Any = eval_dataset if eval_dataset is not None else self.eval_dataset
+        dataloader = self.get_eval_dataloader(ds)
 
-        model = self._wrap_model(self.model, training=False)
+        model: Any = self.model
         model.eval()
+
+        tokenizer: PreTrainedTokenizerBase = self.processing_class  # type: ignore[assignment]
 
         # Accumulators
         all_pred_strs: list[str] = []
@@ -83,28 +101,27 @@ class StreamingEvalTrainer(Seq2SeqTrainer):
                 break
 
             inputs = self._prepare_inputs(inputs)
-            labels = inputs.get("labels", None)
+            # Pop labels before generate() — it doesn't accept them
+            labels = inputs.pop("labels", None)
 
             with torch.no_grad():
-                generated = model.generate(
-                    input_ids=inputs["input_ids"],
-                    attention_mask=inputs["attention_mask"],
+                generated: torch.Tensor = model.generate(
+                    **inputs,
                     max_length=self.args.generation_max_length,
                 )
 
             # Decode this batch immediately — no accumulation of token arrays
-            gen_np = generated.cpu().numpy()
+            gen_np: np.ndarray[Any, Any] = generated.cpu().numpy()
             if labels is not None:
-                lab_np = labels.cpu().numpy()
-                lab_np = np.where(lab_np != -100, lab_np, self.tokenizer.pad_token_id)
+                lab_np: np.ndarray[Any, Any] = labels.cpu().numpy()
+                lab_np = np.where(lab_np != -100, lab_np, tokenizer.pad_token_id)
+                batch_labels = tokenizer.batch_decode(
+                    lab_np, skip_special_tokens=True,
+                )
             else:
-                lab_np = None
+                batch_labels = []
 
-            batch_preds = self.tokenizer.batch_decode(gen_np, skip_special_tokens=True)
-            batch_labels = (
-                self.tokenizer.batch_decode(lab_np, skip_special_tokens=True)
-                if lab_np is not None else []
-            )
+            batch_preds = tokenizer.batch_decode(gen_np, skip_special_tokens=True)
 
             all_pred_strs.extend(batch_preds)
             all_label_strs.extend(batch_labels)
@@ -119,7 +136,7 @@ class StreamingEvalTrainer(Seq2SeqTrainer):
         all_label_strs = all_label_strs[:cap]
         sources = self._val_sources[:len(all_pred_strs)]
 
-        # ---- Compute metrics (same logic as your compute_metrics) ----
+        # ---- Compute metrics ----
         print(f"[{_ts()}] streaming_evaluate: computing metrics over "
               f"{len(all_pred_strs)} samples ...")
 
@@ -132,7 +149,8 @@ class StreamingEvalTrainer(Seq2SeqTrainer):
             fl_cer = 0.0
 
         # Span-level CER (inline, no breakdown during training)
-        gold_spans, pred_spans = [], []
+        gold_spans: list[str] = []
+        pred_spans: list[str] = []
         for marked, output, target in zip(sources, all_pred_strs, all_label_strs):
             if ABBR_OPEN not in marked:
                 continue
@@ -154,12 +172,12 @@ class StreamingEvalTrainer(Seq2SeqTrainer):
         else:
             n_exact, span_cer = 0, 0.0
 
-        metrics = {
+        metrics: dict[str, float] = {
             f"{metric_key_prefix}_full_line_cer": round(fl_cer, 4),
             f"{metric_key_prefix}_span_cer": round(span_cer, 4),
             f"{metric_key_prefix}_span_exact_match": round(n_exact / n_spans, 4) if n_spans else 0.0,
             f"{metric_key_prefix}_n_spans": n_spans,
-            f"{metric_key_prefix}_loss": 0.0,  # placeholder — not computed in streaming mode
+            f"{metric_key_prefix}_loss": 0.0,
         }
 
         print(f"[{_ts()}] streaming_evaluate: done — "
