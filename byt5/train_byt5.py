@@ -27,8 +27,6 @@ import json
 import random
 import argparse
 from pathlib import Path
-import signal
-from contextlib import contextmanager
 from datetime import datetime
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -43,7 +41,7 @@ from transformers import (
     AutoTokenizer,
     T5ForConditionalGeneration,
     DataCollatorForSeq2Seq,
-#    Seq2SeqTrainer,
+    Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     EarlyStoppingCallback,
 )
@@ -54,7 +52,7 @@ from transformers import TrainerCallback
 
 from data.data_utils import load_and_sort_lines, build_byt5_examples, document_split
 from evaluation.evaluation import compute_span_cer, extract_cer
-from evaluation.streaming_eval_trainer import StreamingEvalTrainer
+# from evaluation.streaming_eval_trainer import StreamingEvalTrainer
 
 cer_metric = hf_evaluate.load("cer")
 
@@ -74,7 +72,7 @@ def parse_args():
     p.add_argument("--dataset_repo",      default=None, help="HF dataset repo id (for Hub/Jobs mode)")
     p.add_argument("--dataset_local",     default=None, help="Local JSONL path (for local testing mode)")
     p.add_argument("--output_repo",       default=None, help="HF model repo (omit for local testing)")
-    p.add_argument("--output_dir",        default="./boundary_classifier_output", help="Local output directory (for local testing mode)")
+    p.add_argument("--output_dir",        default="./byt5_classifier_output", help="Local output directory (for local testing mode)")
     p.add_argument("--epochs",            type=int,   default=10)
     p.add_argument("--eval_strategy",     default="steps", choices=["no", "epoch", "steps"])
     p.add_argument("--eval_steps",        type=int,   default=5000)
@@ -84,7 +82,7 @@ def parse_args():
     p.add_argument("--learning_rate",     type=float, default=1e-4)
     p.add_argument("--max_input_length",  type=int,   default=512)
     p.add_argument("--max_target_length", type=int,   default=512)
-    p.add_argument("--cap_eval",          type=int,   default=None, help="Max number of samples to evaluate during training (to speed up metrics on large val sets)")
+    p.add_argument("--cap_eval",          type=int,   default=None, help="Max eval samples for generation and metrics during training")
     p.add_argument("--oversample_abbr",   type=float, default=2.0)
     p.add_argument("--lang_prefix",       action="store_true")
     p.add_argument("--seed",              type=int,   default=42)
@@ -157,65 +155,68 @@ def decode_predictions(tokenizer, predictions, labels):
 
 
 # ---------------------------------------------------------------------------
-# Hub upload callback for HuggingFace Trainer — optional, but useful for
-# saving checkpoints to the Hub during training, especially when using HuggingFace Jobs.
+# compute_metrics callback
 # ---------------------------------------------------------------------------
 
-@contextmanager
-def timeout(seconds: int):
-    """Context manager that raises TimeoutError after given seconds."""
-    def handler(signum, frame):
-        raise TimeoutError(f"Upload timed out after {seconds}s")
-    old_handler = signal.signal(signal.SIGALRM, handler)
-    signal.alarm(seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
+    """
+    Returns a compute_metrics function for Seq2SeqTrainer.
 
+    val_sources: the marked input strings for the val set, captured in
+    a closure. Used to compute span-level CER during validation without
+    threading extra state through the Trainer API.
 
-class PeriodicHubUploadCallback(TrainerCallback):
-    def __init__(
-        self,
-        output_dir:     str,
-        repo_id:        str,
-        api:            HfApi,        # pass in existing instance
-        every_n_epochs: int = 1,
-        timeout_secs:   int = 300,
-    ):
-        self.output_dir   = Path(output_dir)
-        self.repo_id      = repo_id
-        self.api          = api       # reuse rather than recreate
-        self.every_n      = every_n_epochs
-        self.timeout_secs = timeout_secs
+    Note: assumes single-GPU training (Trainer preserves val set order).
+    For multi-GPU, disable span metrics during training and run post-hoc.
+    """
 
-    def on_epoch_end(self, args, state, control, **kwargs):
-        if not (state.epoch and int(state.epoch) % self.every_n == 0):
-            return
+    if cap_eval is None:
+        cap_eval = len(val_sources)
 
-        checkpoint_dir = (self.output_dir / "checkpoints"
-                          / f"checkpoint-{state.global_step}")
-        if not checkpoint_dir.exists():
-            print(f"Checkpoint dir {checkpoint_dir} not found, skipping upload")
-            return
+    def compute_metrics(eval_preds):
 
-        print(f"Uploading checkpoint at epoch {state.epoch} "
-              f"(timeout: {self.timeout_secs}s)...")
+        preds, labels = eval_preds
+        if isinstance(preds, tuple):
+            preds = preds[0]
+
+        print(f"[{_ts()}] compute_metrics: decoding {len(preds)} predictions ...")
+        decoded_preds, decoded_labels = decode_predictions(
+            tokenizer, preds, labels
+        )
+
+        print(f"[{_ts()}] compute_metrics: decoding done. Starting full-line CER ...")
+        # Sample to avoid jiwer hanging on large val sets
         try:
-            with timeout(self.timeout_secs):
-                self.api.upload_folder(
-                    folder_path=str(checkpoint_dir),
-                    path_in_repo=f"checkpoints/checkpoint-{state.global_step}",
-                    repo_id=self.repo_id,
-                    repo_type="model",
-                    commit_message=f"Checkpoint epoch {state.epoch:.0f}",
-                )
-            print("Checkpoint uploaded successfully.")
-        except TimeoutError as e:
-            print(f"Warning: {e} — skipping checkpoint upload, training continues.")
-        except Exception as e:
-            print(f"Warning: checkpoint upload failed ({e}) — training continues.")
+            full_line_cer_result = cer_metric.compute(
+                predictions=decoded_preds[:cap_eval],
+                references=decoded_labels[:cap_eval],
+            )
+            full_line_cer = extract_cer(full_line_cer_result) if full_line_cer_result else 0.0
+        except ZeroDivisionError:
+            full_line_cer = 0.0
+
+        # Cap val_sources to match decoded_preds length
+        # to avoid passing 314k sources when only 10k were evaluated
+        capped_val_sources = val_sources[:len(decoded_preds)]
+        print(f"[{_ts()}] compute_metrics: full-line CER done ({full_line_cer:.4f}). Starting span CER over {len(capped_val_sources)} sources ...")
+
+        span_results = compute_span_cer(
+            marked_inputs=capped_val_sources,
+            model_outputs=decoded_preds,
+            target_corrs=decoded_labels,
+            include_breakdown=False,   # skip expensive breakdown during training
+            max_source_lines=cap_eval,
+        )
+        print(f"[{_ts()}] compute_metrics: span CER done, returning metrics")
+
+        return {
+            "full_line_cer":    round(full_line_cer, 4),
+            "span_cer":         round(span_results["span_cer"] or 0.0, 4),
+            "span_exact_match": round(span_results["span_exact_match"] or 0.0, 4),
+            "n_spans":          span_results["n_spans"],
+        }
+
+    return compute_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +408,7 @@ def main():
 
     # Metrics closure over val sources
     val_sources     = [e["source"] for e in val_ex]
+    compute_metrics = make_compute_metrics(tokenizer, val_sources, args.cap_eval)
 
     # --- Training arguments: checkpoints go into output_dir/checkpoints ---
     checkpoints_dir = output_dir / "checkpoints"
@@ -457,28 +459,20 @@ def main():
     training_args = Seq2SeqTrainingArguments(**training_kwargs)
 
     print("Initializing Trainer...")
-    trainer = StreamingEvalTrainer(
+    eval_size = args.cap_eval or min(10000, len(tokenized["val"]))
+    trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
-        eval_dataset=tokenized["val"].select(range(min(10000, len(tokenized["val"])))),
+        eval_dataset=tokenized["val"].select(range(min(eval_size, len(tokenized["val"])))),
         data_collator=collator,
-        val_sources=val_sources,
-        cap_eval=args.cap_eval,
-        tokenizer=tokenizer,
-        # compute_metrics is gone — handled internally
+        # val_sources=val_sources,
+        # cap_eval=args.cap_eval,
+        # tokenizer=tokenizer,
+        compute_metrics=compute_metrics,
         callbacks=[
             EarlyStoppingCallback(early_stopping_patience=3),
-            # CarbonTrackerCallback(str(output_dir)),
-            *(
-                [PeriodicHubUploadCallback(
-                    output_dir=str(output_dir),
-                    repo_id=args.output_repo,
-                    api=api,
-                    every_n_epochs=1,
-                )]
-                if use_hub else []
-            ),
+            CarbonTrackerCallback(str(output_dir)),
         ],
     )
 
