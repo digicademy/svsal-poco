@@ -463,8 +463,9 @@ def main():
         train_dataset=tokenized["train"],
         eval_dataset=tokenized["val"].select(range(min(10000, len(tokenized["val"])))),
         data_collator=collator,
-        val_sources=val_sources,       # new kwarg
-        cap_eval=args.cap_eval,        # new kwarg
+        val_sources=val_sources,
+        cap_eval=args.cap_eval,
+        tokenizer=tokenizer,
         # compute_metrics is gone — handled internally
         callbacks=[
             EarlyStoppingCallback(early_stopping_patience=3),

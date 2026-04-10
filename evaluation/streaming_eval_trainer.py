@@ -55,13 +55,14 @@ class StreamingEvalTrainer(Seq2SeqTrainer):
         *args: Any,
         val_sources: list[str],
         cap_eval: Optional[int] = None,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
         **kwargs: Any,
     ):
-        # Remove compute_metrics — we handle it ourselves during evaluate()
         kwargs.pop("compute_metrics", None)
         super().__init__(*args, **kwargs)
         self._val_sources = val_sources
         self._cap_eval = cap_eval
+        self._tokenizer = tokenizer
 
     # ------------------------------------------------------------------
     def evaluate(                                       # type: ignore[override]
@@ -83,7 +84,7 @@ class StreamingEvalTrainer(Seq2SeqTrainer):
         model: Any = self.model
         model.eval()
 
-        tokenizer: PreTrainedTokenizerBase = self.processing_class  # type: ignore[assignment]
+        tokenizer: PreTrainedTokenizerBase = self._tokenizer  # type: ignore[assignment]
 
         # Accumulators
         all_pred_strs: list[str] = []
