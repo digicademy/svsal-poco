@@ -45,7 +45,7 @@ from transformers import (
     Seq2SeqTrainingArguments,
     EarlyStoppingCallback,
 )
-from huggingface_hub import login, HfApi, hf_hub_download
+from huggingface_hub import login, HfApi, hf_hub_download, RepoFolder, snapshot_download
 
 from codecarbon import EmissionsTracker
 from transformers import TrainerCallback
@@ -152,6 +152,48 @@ def decode_predictions(tokenizer, predictions, labels):
     decoded_preds  = tokenizer.batch_decode(predictions, skip_special_tokens=True)
     decoded_labels = tokenizer.batch_decode(labels,      skip_special_tokens=True)
     return decoded_preds, decoded_labels
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint management for HuggingFace Hub integration
+# ---------------------------------------------------------------------------
+
+def find_resume_checkpoint(api: HfApi, repo_id: str, local_dir: Path) -> str | None:
+    """
+    Check the Hub model repo for existing checkpoints.
+    If found, download the latest one and return its local path.
+    Returns None if no checkpoint exists or download fails.
+    """
+    try:
+        entries = list(api.list_repo_tree(
+            repo_id=repo_id,
+            path_in_repo="checkpoints",
+            repo_type="model",
+        ))
+        checkpoint_dirs = sorted(
+            [e.path for e in entries
+             if isinstance(e, RepoFolder) and e.path.startswith("checkpoints/checkpoint-")],
+            key=lambda x: int(x.rsplit("-", 1)[-1]),
+        )
+        if not checkpoint_dirs:
+            print("No remote checkpoints found, training from scratch.")
+            return None
+
+        latest = checkpoint_dirs[-1]  # e.g. "checkpoints/checkpoint-14979"
+        print(f"Found remote checkpoint: {latest}, downloading...")
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=str(local_dir),
+            allow_patterns=f"{latest}/**",
+            repo_type="model",
+        )
+        local_path = str(local_dir / latest)
+        print(f"Will resume from {local_path}")
+        return local_path
+
+    except Exception as e:
+        print(f"Checkpoint lookup failed ({e}), training from scratch.")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +374,6 @@ def main():
     if args.use_cache and not cache_path.exists() and use_hub:
         try:
             print("Downloading tokenized cache from Hub...")
-            from huggingface_hub import snapshot_download
             snapshot_download(
                 repo_id=args.output_repo,
                 local_dir=str(output_dir),
@@ -486,8 +527,13 @@ def main():
         config=vars(args),
     )
 
+    resume_checkpoint = (
+        find_resume_checkpoint(api, args.output_repo, output_dir)
+        if use_hub else None
+    )
+
     print("Starting training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
     print("Training complete.")
 
     # --- Test evaluation ---
