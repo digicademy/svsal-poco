@@ -94,6 +94,7 @@ def parse_args():
     p.add_argument("--bf16",              action="store_true", help="Use bf16 mixed precision (A10G support; requires compatible GPU and drivers)")
     p.add_argument("--fp16",              action="store_true", help="Use fp16 mixed precision (for GPUs without bf16 support; requires compatible GPU and drivers)")
     p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
+    p.add_argument("--no_resume",         action="store_true", help="Train from scratch even if a checkpoint exists on the Hub")
     return p.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -529,7 +530,7 @@ def main():
 
     resume_checkpoint = (
         find_resume_checkpoint(api, args.output_repo, output_dir)
-        if use_hub else None
+        if use_hub and not args.no_resume else None
     )
 
     print("Starting training...")
