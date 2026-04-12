@@ -29,12 +29,14 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 import numpy as np
 import torch
 import evaluate as hf_evaluate
 import wandb
+
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+if torch.cuda.is_available() and "CUDA" in torch.cuda.get_device_name(0).upper():
+      os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from datasets import Dataset, DatasetDict
 from transformers import (
@@ -95,6 +97,7 @@ def parse_args():
     p.add_argument("--fp16",              action="store_true", help="Use fp16 mixed precision (for GPUs without bf16 support; requires compatible GPU and drivers)")
     p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
     p.add_argument("--no_resume",         action="store_true", help="Train from scratch even if a checkpoint exists on the Hub")
+    p.add_argument("--attn_implementation", default=None, help="Attention backend: 'sdpa', 'flash_attention_2', or None for default")
     return p.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -362,11 +365,12 @@ def main():
 
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+
     print("Loading model...")
-    model     = T5ForConditionalGeneration.from_pretrained(
-        args.model_name,
-        tie_word_embeddings=False,
-    )
+    kwargs = dict(tie_word_embeddings=False)
+    if args.attn_implementation:
+        kwargs["attn_implementation"] = args.attn_implementation
+    model = T5ForConditionalGeneration.from_pretrained(args.model_name, **kwargs)
     print(f"Model loaded: {args.model_name}")
 
     cache_path = output_dir / "tokenized_cache"
