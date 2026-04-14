@@ -41,20 +41,18 @@ if torch.cuda.is_available() and "CUDA" in torch.cuda.get_device_name(0).upper()
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
-    T5ForConditionalGeneration,
     DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
-    EarlyStoppingCallback,
+    T5ForConditionalGeneration,
+    TrainerCallback,
 )
 from huggingface_hub import login, HfApi, hf_hub_download, RepoFolder, snapshot_download
-
 from codecarbon import EmissionsTracker
-from transformers import TrainerCallback
 
 from data.data_utils import load_and_sort_lines, build_byt5_examples, document_split
 from evaluation.evaluation import compute_span_cer, extract_cer
-# from evaluation.streaming_eval_trainer import StreamingEvalTrainer
 
 cer_metric = hf_evaluate.load("cer")
 
@@ -71,8 +69,6 @@ def _ts():
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model_name",        default="google/byt5-base")
-    p.add_argument("--dataset_repo",      default=None, help="HF dataset repo id (for Hub/Jobs mode)")
-    p.add_argument("--dataset_local",     default=None, help="Local JSONL path (for local testing mode)")
     p.add_argument("--output_repo",       default=None, help="HF model repo (omit for local testing)")
     p.add_argument("--output_dir",        default="./byt5_classifier_output", help="Local output directory (for local testing mode)")
     p.add_argument("--epochs",            type=int,   default=10)
@@ -93,11 +89,17 @@ def parse_args():
     p.add_argument("--wandb_project",     default=os.environ.get("WANDB_PROJECT", "byt5-salamanca-abbr"))
     p.add_argument("--wandb_entity",      default=os.environ.get("WANDB_ENTITY", None))
     p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
-    p.add_argument("--bf16",              action="store_true", help="Use bf16 mixed precision (A10G support; requires compatible GPU and drivers)")
-    p.add_argument("--fp16",              action="store_true", help="Use fp16 mixed precision (for GPUs without bf16 support; requires compatible GPU and drivers)")
     p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
-    p.add_argument("--no_resume",         action="store_true", help="Train from scratch even if a checkpoint exists on the Hub")
     p.add_argument("--attn_implementation", default=None, help="Attention backend: 'sdpa', 'flash_attention_2', or None for default")
+    data_group = p.add_mutually_exclusive_group(required=True)
+    data_group.add_argument("--dataset_repo",  default=None, help="HF dataset repo id (for Hub/Jobs mode)")
+    data_group.add_argument("--dataset_local", default=None, help="Local JSONL path (for local testing mode)")
+    precision_group = p.add_mutually_exclusive_group()
+    precision_group.add_argument("--bf16", action="store_true", help="Use bf16 mixed precision (A10G support; requires compatible GPU and drivers)")
+    precision_group.add_argument("--fp16", action="store_true", help="Use fp16 mixed precision (for GPUs without bf16 support; requires compatible GPU and drivers)")
+    resume_group = p.add_mutually_exclusive_group()
+    resume_group.add_argument("--eval_only", action="store_true", help="Skip training, load best model from Hub, run test eval only")
+    resume_group.add_argument("--no_resume", action="store_true", help="Train from scratch even if a checkpoint exists on the Hub")
     return p.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -303,12 +305,22 @@ class CarbonTrackerCallback(TrainerCallback):
 def main():
     args = parse_args()
     random.seed(args.seed)
+    use_hub = args.output_repo is not None
+
+    if args.eval_only and not use_hub:
+        raise ValueError("--eval_only requires --output_repo (model to evaluate)")
+
+    if args.eval_strategy == "no":
+        if args.cap_eval:
+            print("Warning: --cap_eval has no effect with --eval_strategy no")
+
+    if use_hub and not args.hf_token:
+        raise ValueError("--output_repo requires HF_TOKEN to be set")
 
     # Login to HugingFace Hub
-    use_hub = args.output_repo is not None
+    api = HfApi() if use_hub else None
     if args.hf_token and (args.dataset_repo or use_hub):
         login(token=args.hf_token)
-        api = HfApi()
 
     # --- Fail fast if GPU requested but unavailable ---
     if args.bf16 or args.fp16:
@@ -333,13 +345,12 @@ def main():
     else:
         raise ValueError("Provide either --dataset_local or --dataset_repo")
 
-    use_hub    = args.output_repo is not None
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Data, tokenizer, model (unchanged) ---
+    # --- Load data ---
     print("Loading lines...")
-    lines    = load_and_sort_lines(data_path)
+    lines = load_and_sort_lines(data_path)
     print(f"Loaded {len(lines)} lines from {data_path}")
     print("Building examples...")
     examples = build_byt5_examples(
@@ -363,87 +374,21 @@ def main():
         print("Warning: empty test set, using full dataset for evaluation")
         test_ex = examples
 
+    # --- Load model, tokenizer and collator ---
+    # If eval_only is set, we want to load the best model from the Hub (if available)
+    # otherwise we'll train from scratch and load the base model.
+    model_id = args.output_repo if args.eval_only and use_hub else args.model_name
+
     print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     print("Loading model...")
     kwargs = dict(tie_word_embeddings=False)
     if args.attn_implementation:
         kwargs["attn_implementation"] = args.attn_implementation
-    model = T5ForConditionalGeneration.from_pretrained(args.model_name, **kwargs)
+    model = T5ForConditionalGeneration.from_pretrained(model_id, **kwargs)
     print(f"Model loaded: {args.model_name}")
 
-    cache_path = output_dir / "tokenized_cache"
-
-    # Try to download cache from Hub if not present locally
-    if args.use_cache and not cache_path.exists() and use_hub:
-        try:
-            print("Downloading tokenized cache from Hub...")
-            snapshot_download(
-                repo_id=args.output_repo,
-                local_dir=str(output_dir),
-                allow_patterns="tokenized_cache/**",
-                repo_type="model",
-            )
-            if cache_path.exists():
-                print("Cache downloaded successfully.")
-            else:
-                print("No cached tokenization found on Hub, will tokenize from scratch.")
-        except Exception as e:
-            print(f"Cache download failed ({e}), will tokenize from scratch.")
-
-    if args.use_cache and cache_path.exists():
-        print("Loading tokenized dataset from cache...")
-        tokenized = DatasetDict.load_from_disk(str(cache_path))
-    else:
-        # Only build raw dataset if we actually need to tokenize
-        print("Building raw dataset for tokenization...")
-        def to_hf_dataset(exs):
-            return Dataset.from_dict({
-                "source":   [e["source"]   for e in exs],
-                "target":   [e["target"]   for e in exs],
-                "has_abbr": [e["has_abbr"] for e in exs],
-                "doc_id":   [e["doc_id"]   for e in exs],
-                "lang":     [e["lang"]     for e in exs],
-            })
-
-        raw = DatasetDict({
-            "train": to_hf_dataset(train_ex),
-            "val":   to_hf_dataset(val_ex),
-            "test":  to_hf_dataset(test_ex),
-        })
-
-        print("Tokenizing dataset...")
-        tokenize_fn = make_tokenize_fn(
-            tokenizer, args.max_input_length, args.max_target_length
-        )
-        tokenized = raw.map(
-            tokenize_fn,
-            batched=True,
-            num_proc=args.tokenizer_num_proc,
-            remove_columns=["source", "target", "has_abbr", "doc_id", "lang"],
-        )
-        if args.use_cache:
-            tokenized.save_to_disk(str(cache_path))
-            print(f"Tokenized dataset cached to {cache_path}")
-            if use_hub:
-                print("Uploading tokenized cache to Hub...")
-                try:
-                    api.upload_folder(
-                        folder_path=str(cache_path),
-                        path_in_repo="tokenized_cache",
-                        repo_id=args.output_repo,
-                        repo_type="model",
-                    )
-                    print("Cache uploaded to Hub.")
-                except Exception as e:
-                    print(f"Warning: cache upload failed ({e}). Training will continue.")
-        else:
-            print("Tokenized dataset not cached (use --use_cache to enable caching)")
-
-    print(f"Tokenized dataset: {tokenized}")
-
-    # Data collator — pads per batch rather than globally
     print("Initializing data collator...")
     collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
@@ -452,101 +397,209 @@ def main():
         pad_to_multiple_of=8,
     )
 
-    # Metrics closure over val sources
-    val_sources     = [e["source"] for e in val_ex]
-    compute_metrics = make_compute_metrics(tokenizer, val_sources, args.cap_eval)
+    # --- Tokenize (with caching) ---
 
-    # --- Training arguments: checkpoints go into output_dir/checkpoints ---
-    checkpoints_dir = output_dir / "checkpoints"
-    training_kwargs = dict(
-        output_dir=str(checkpoints_dir),
-
-        warmup_steps=500,
-        lr_scheduler_type="cosine",
-        weight_decay=0.01,
-        predict_with_generate=True,
-
-        generation_max_length=args.max_target_length,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.train_batch_size,
-        learning_rate=args.learning_rate,
-
-        bf16=args.bf16, # Mixed precision to save memory, as configured in command-line
-        fp16=args.fp16, # A10G support bf16; use fp16=True if not available
-        # If we have to use smaller batches to avoid OOM,
-        # we have to compensate with gradient accumulation to reach
-        # an effective batch size of at least 16
-        # (gradient_accumulation_steps * batch_size = effective batch size)
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-
-        # Use span CER as the model selection criterion —
-        # this focuses early stopping on expansion quality,
-        # not copying fidelity
-        metric_for_best_model="eval_span_cer",
-        per_device_eval_batch_size=args.eval_batch_size,
-        eval_strategy=args.eval_strategy,
-        eval_steps=args.eval_steps,
-        save_strategy=args.eval_strategy,  # checkpoint at same frequency as eval
-        save_steps=args.eval_steps,
-        load_best_model_at_end=True,
-        greater_is_better=False,
-
-        seed=args.seed,
-        logging_steps=100,
-        report_to="all",  # log to both console and WandB (if initialized)
-        dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
-
-        # Hub integration only when use_hub is True
-        push_to_hub=use_hub,
-        hub_model_id=args.output_repo if use_hub else None,
-    )
-    if use_hub:
-        training_kwargs["hub_strategy"] = "checkpoint"
-    training_args = Seq2SeqTrainingArguments(**training_kwargs)
-
-    print("Initializing Trainer...")
-    eval_size = args.cap_eval or min(10000, len(tokenized["val"]))
-    trainer = Seq2SeqTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized["train"],
-        eval_dataset=tokenized["val"].select(range(min(eval_size, len(tokenized["val"])))),
-        data_collator=collator,
-        # val_sources=val_sources,
-        # cap_eval=args.cap_eval,
-        # tokenizer=tokenizer,
-        compute_metrics=compute_metrics,
-        callbacks=[
-            EarlyStoppingCallback(early_stopping_patience=3),
-            CarbonTrackerCallback(str(output_dir)),
-        ],
+    tokenize_fn = make_tokenize_fn(
+        tokenizer, args.max_input_length, args.max_target_length,
     )
 
-    # --- Initialize WandB run (optional, but recommended for rich logging and visualization) ---
-    print("Initializing WandB...")
-    wandb.login(key=args.wandb_key)
-    wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,   # None means wandb uses your default entity
-        name=f"byt5-base-{args.epochs}ep-bs{args.train_batch_size}",
-        config=vars(args),
-    )
+    def tokenize_examples(exs: list[dict]) -> Dataset:
+        """Build a HF Dataset from raw examples and tokenize it."""
+        raw = Dataset.from_dict({
+            "source": [e["source"] for e in exs],
+            "target": [e["target"] for e in exs],
+        })
+        return raw.map(
+            tokenize_fn,
+            batched=True,
+            num_proc=args.tokenizer_num_proc,
+            remove_columns=["source", "target"],
+        )
 
-    resume_checkpoint = (
-        find_resume_checkpoint(api, args.output_repo, output_dir)
-        if use_hub and not args.no_resume else None
-    )
+    # In eval-only mode, we only need the test split — no caching, no training data
+    if args.eval_only:
+        print("Eval-only mode: tokenizing just the test split...")
+        tokenized_test = tokenize_examples(test_ex)
 
-    print("Starting training...")
-    trainer.train(resume_from_checkpoint=resume_checkpoint)
-    print("Training complete.")
+    else:
+        cache_path = output_dir / "tokenized_cache"
+        cache_valid = False
 
-    # --- Test evaluation ---
+        if args.use_cache:
+            # Try to download cache from Hub if not present locally
+            if not cache_path.exists() and use_hub:
+                try:
+                    print("Downloading tokenized cache from Hub...")
+                    snapshot_download(
+                        repo_id=args.output_repo,
+                        local_dir=str(output_dir),
+                        allow_patterns="tokenized_cache/**",
+                        repo_type="model",
+                    )
+                    if cache_path.exists():
+                        print("Cache downloaded successfully.")
+                    else:
+                        print("No cached tokenization found on Hub, will tokenize from scratch.")
+                except Exception as e:
+                    print(f"Cache download failed ({e}), will tokenize from scratch.")
+
+            # Check if cache is (now) available locally, validate it, and load if valid
+            if cache_path.exists():
+                print("Loading tokenized dataset from cache...")
+                tokenized = DatasetDict.load_from_disk(str(cache_path))
+                expected = { "train": len(train_ex), "val": len(val_ex), "test": len(test_ex) }
+                actual = { split: len(tokenized[split]) for split in tokenized }
+                if actual == expected:
+                    print(f"Cache valid with splits: {actual}")
+                    cache_valid = True
+                else:
+                    print(f"Cache invalid: expected {expected}, got {actual}. Will tokenize from scratch.")
+
+        if not cache_valid:
+            print("Tokenizing all splits from scratch ...")
+            tokenized = DatasetDict({
+                "train": tokenize_examples(train_ex),
+                "val":   tokenize_examples(val_ex),
+                "test":  tokenize_examples(test_ex),
+            })
+            if args.use_cache:
+                tokenized.save_to_disk(str(cache_path))
+                print(f"Tokenized dataset cached to {cache_path}")
+                if use_hub:
+                    print("Uploading tokenized cache to Hub...")
+                    try:
+                        api.upload_folder(
+                            folder_path=str(cache_path),
+                            path_in_repo="tokenized_cache",
+                            repo_id=args.output_repo,
+                            repo_type="model",
+                        )
+                        print("Cache uploaded to Hub.")
+                    except Exception as e:
+                        print(f"Warning: cache upload failed ({e}). "
+                              "Training will continue.")
+
+        print(f"Tokenized dataset: {tokenized}")
+        tokenized_test = tokenized["test"]
+
+    # --- Training ---
+    if not args.eval_only:
+
+        # Metrics closure over val sources
+        val_sources     = [e["source"] for e in val_ex]
+        compute_metrics = make_compute_metrics(tokenizer, val_sources, args.cap_eval)
+
+        # Training arguments: checkpoints go into output_dir/checkpoints
+        checkpoints_dir = output_dir / "checkpoints"
+        training_kwargs = dict(
+            output_dir=str(checkpoints_dir),
+
+            warmup_steps=500,
+            lr_scheduler_type="cosine",
+            weight_decay=0.01,
+            predict_with_generate=True,
+
+            generation_max_length=args.max_target_length,
+            num_train_epochs=args.epochs,
+            per_device_train_batch_size=args.train_batch_size,
+            learning_rate=args.learning_rate,
+
+            bf16=args.bf16, # Mixed precision to save memory, as configured in command-line
+            fp16=args.fp16, # A10G support bf16; use fp16=True if not available
+            # If we have to use smaller batches to avoid OOM,
+            # we have to compensate with gradient accumulation to reach
+            # an effective batch size of at least 16
+            # (gradient_accumulation_steps * batch_size = effective batch size)
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+
+            # Use span CER as the model selection criterion —
+            # this focuses early stopping on expansion quality,
+            # not copying fidelity
+            metric_for_best_model="eval_span_cer",
+            per_device_eval_batch_size=args.eval_batch_size,
+            eval_strategy=args.eval_strategy,
+            eval_steps=args.eval_steps,
+            save_strategy=args.eval_strategy,  # checkpoint at same frequency as eval
+            save_steps=args.eval_steps,
+            load_best_model_at_end=True,
+            greater_is_better=False,
+
+            seed=args.seed,
+            logging_steps=100,
+            report_to="all",  # log to both console and WandB (if initialized)
+            dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
+
+            # Hub integration only when use_hub is True
+            push_to_hub=use_hub,
+            hub_model_id=args.output_repo if use_hub else None,
+        )
+        if use_hub:
+            training_kwargs["hub_strategy"] = "checkpoint"
+        training_args = Seq2SeqTrainingArguments(**training_kwargs)
+
+        print("Initializing Trainer...")
+        eval_size = args.cap_eval or min(10000, len(tokenized["val"]))
+        trainer = Seq2SeqTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized["train"],
+            eval_dataset=tokenized["val"].select(range(min(eval_size, len(tokenized["val"])))),
+            data_collator=collator,
+            # val_sources=val_sources,
+            # cap_eval=args.cap_eval,
+            # tokenizer=tokenizer,
+            compute_metrics=compute_metrics,
+            callbacks=[
+                EarlyStoppingCallback(early_stopping_patience=3),
+                CarbonTrackerCallback(str(output_dir)),
+            ],
+        )
+
+        print("Initializing WandB...")
+        wandb.login(key=args.wandb_key)
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,   # None means wandb uses your default entity
+            name=f"byt5-base-{args.epochs}ep-bs{args.train_batch_size}",
+            config=vars(args),
+        )
+
+        resume_checkpoint = (
+            find_resume_checkpoint(api, args.output_repo, output_dir)
+            if use_hub and not args.no_resume else None
+        )
+
+        # --- Do it! ---
+        print("Starting training...")
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
+        print("Training complete.")
+
+        # Push the best model to the Hub even before evaluation to be on the safe side
+        # in case something goes wrong during evaluation and prevents the final push
+        if use_hub:
+            print("Pushing best model to Hub...")
+            trainer.push_to_hub(commit_message="Best checkpoint after training")
+
+    # --- Test evaluation (in both training and eval_only mode) ---
     test_sources = [e["source"] for e in test_ex]
-    test_targets = [e["target"] for e in test_ex]
 
-    print("Running test evaluation...")
-    test_output = trainer.predict(tokenized["test"])
+    # eval-only mode: we can do with light-weight trainer just for prediction
+    if args.eval_only:
+        eval_args = Seq2SeqTrainingArguments(
+            output_dir=str(output_dir / "eval_tmp"),
+            per_device_eval_batch_size=args.eval_batch_size,
+            predict_with_generate=True,
+            generation_max_length=args.max_target_length,
+            bf16=args.bf16,
+            fp16=args.fp16,
+        )
+        trainer = Seq2SeqTrainer(
+            model=model, args=eval_args,
+            data_collator=collator,
+        )
+
+    print("Running test evaluation. Predicting...")
+    test_output = trainer.predict(tokenized_test)
     test_preds, test_labels = decode_predictions(
         tokenizer,
         test_output.predictions,
@@ -556,7 +609,7 @@ def main():
     test_metrics = compute_span_cer(
         marked_inputs=test_sources,
         model_outputs=test_preds,
-        target_corrs=test_targets,
+        target_corrs=test_labels,
         include_breakdown=True,   # include breakdown for final test evaluation
         max_source_lines=None,    # process everything for the final evaluation
     )
