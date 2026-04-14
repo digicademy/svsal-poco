@@ -15,7 +15,7 @@ from pathlib import Path
 import gradio as gr
 import spaces
 import torch
-from huggingface_hub import HfApi, hf_hub_download, login, RepoFolder
+from huggingface_hub import HfApi, hf_hub_download, login, RepoFolder, snapshot_download
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 from codecarbon import EmissionsTracker
 
@@ -49,11 +49,13 @@ _emissions_lock   = threading.Lock()           # thread-safe updates
 _session_emissions = {"kg": 0.0, "n": 0}
 _api              = HfApi()
 
-byt5_model = None
-byt5_tokenizer = None
 boundary_model = None
-canine_tokenizer = None
+boundary_model_local_dir = None
+boundary_tokenizer = None
 boundary_threshold = None
+byt5_model = None
+byt5_model_local_dir = None
+byt5_tokenizer = None
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +93,7 @@ def make_emissions_tracker() -> tuple:
             tracker = EmissionsTracker(
                 log_level="error",
                 save_to_file=False,
+                allow_multiple_runs=True,
             )
             print("Carbon tracking: CPU-only mode (ZeroGPU)")
             return tracker, "cpu_only"
@@ -105,6 +108,7 @@ def make_emissions_tracker() -> tuple:
             tracker = EmissionsTracker(
                 log_level="error",
                 save_to_file=False,
+                allow_multiple_runs=True,
             )
             return tracker, "full"
         except Exception as e:
@@ -206,19 +210,22 @@ def load_models():
     Load both models from the Hub at Space startup.
     Called once; results are module-level globals used by all handlers.
     """
-    global canine_tokenizer, boundary_model, boundary_threshold
-    global byt5_tokenizer, byt5_model
+    global boundary_model, boundary_model_local_dir, boundary_tokenizer, boundary_threshold
+    global byt5_model, byt5_model_local_dir, byt5_tokenizer
     global _models_loaded, _load_error
 
     try:
+
         # --- Boundary classifier ---
-        canine_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
+
+        boundary_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
         boundary_model   = BoundaryClassifier(use_lexicon=False)
         weights_path     = hf_hub_download(BOUNDARY_REPO, "best_model.pt")
         boundary_model.load_state_dict(
             torch.load(weights_path, map_location="cpu", weights_only=True)
         )
         boundary_model.eval()
+        boundary_model_local_dir = str(Path(weights_path).parent)
 
         threshold_path   = hf_hub_download(BOUNDARY_REPO, "threshold.json")
         boundary_threshold = json.loads(
@@ -226,22 +233,24 @@ def load_models():
         )["threshold"]
 
         # --- ByT5 ---
+
         # The tokenizer can be loaded directly from the "google/byt5-base"
         # checkpoint since it uses the same byte-level tokenization.
-        # The model weights are loaded from our custom checkpoint, which
-        # has the same architecture but different fine-tuned weights. We set
-        # tie_word_embeddings=False to avoid an error about mismatched vocab sizes,
-        # since the custom checkpoint doesn't include the tied embeddings that the
-        # original ByT5 uses.
-        # byt5_tokenizer = AutoTokenizer.from_pretrained(BYT5_REPO)
+        # We set tie_word_embeddings=False to avoid an error about mismatched
+        # vocab sizes, since the custom checkpoint doesn't include the tied
+        # embeddings that the original ByT5 uses.
         byt5_tokenizer = AutoTokenizer.from_pretrained("google/byt5-base")
 
         try:
-            # Try loading from repo root first (final model)
+            # Try root model first
+            byt5_model_local_dir = snapshot_download(
+                BYT5_REPO, repo_type="model",
+            )
             byt5_model = T5ForConditionalGeneration.from_pretrained(
-                BYT5_REPO, tie_word_embeddings=False
+                byt5_model_local_dir, tie_word_embeddings=False,
             )
             print(f"ByT5 loaded from {BYT5_REPO} (root)")
+
         except Exception:
             # Fall back to latest checkpoint
             try:
@@ -258,12 +267,18 @@ def load_models():
                     raise FileNotFoundError("No ByT5 model checkpoints found")
                 latest = checkpoint_dirs[-1]
                 print(f"Loading ByT5 from checkpoint: {latest}")
+                byt5_model_local_dir = snapshot_download(
+                    BYT5_REPO, repo_type="model",
+                    allow_patterns=f"{latest}/**",
+                )
+                byt5_model_local_dir = str(Path(byt5_model_local_dir) / latest)
                 byt5_model = T5ForConditionalGeneration.from_pretrained(
-                    BYT5_REPO, subfolder=latest, tie_word_embeddings=False,
+                    byt5_model_local_dir, tie_word_embeddings=False,
                 )
             except Exception as e2:
                 print(f"ByT5 model not available: {e2}")
                 byt5_model = None
+                byt5_model_local_dir = None
 
         if byt5_model is not None:
             byt5_model.eval()
@@ -316,7 +331,7 @@ def classify_boundaries_only(text: str) -> str:
     result = predict_boundaries(
         lines=rows,
         model=boundary_model,
-        tokenizer=canine_tokenizer,
+        tokenizer=boundary_tokenizer,
         threshold=boundary_threshold,
         context_chars=40,
     )
@@ -361,8 +376,8 @@ def expand_text(text: str) -> tuple[str, str, str]:
         run_pipeline(
             input_path=input_path,
             output_path=output_path,
-            boundary_model_dir=BOUNDARY_REPO,
-            byt5_model_dir=BYT5_REPO,
+            boundary_model_dir=boundary_model_local_dir,
+            byt5_model_dir=byt5_model_local_dir,
             boundary_threshold=boundary_threshold,
             batch_size=16,
         )
@@ -402,6 +417,8 @@ def expand_text(text: str) -> tuple[str, str, str]:
 
 @spaces.GPU(duration=300)
 def run_boundary_only(text: str) -> tuple[str, str]:
+    if boundary_model is None:
+        return "Boundary model not available — cannot run boundary detection.", ""
     if not text.strip():
         return "Please enter some text.", ""
 
@@ -411,6 +428,8 @@ def run_boundary_only(text: str) -> tuple[str, str]:
 
     result     = classify_boundaries_only(text)
     request_kg = tracker.stop() if tracker else 0.0
+    if request_kg is None:
+        request_kg = 0.0
 
     accumulated = record_request_emissions(request_kg)
     carbon_info = format_carbon_info(request_kg, accumulated, tracking_mode=mode)
@@ -431,6 +450,8 @@ def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
 
     expanded, boundaries, diff = expand_text(text)
     request_kg = tracker.stop() if tracker else 0.0
+    if request_kg is None:
+        request_kg = 0.0
 
     accumulated = record_request_emissions(request_kg)
     carbon_info = format_carbon_info(request_kg, accumulated, tracking_mode=mode)
