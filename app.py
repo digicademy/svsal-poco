@@ -240,11 +240,18 @@ def load_models():
 
         try:
             # Try root model first
+            # byt5_model = T5ForConditionalGeneration.from_pretrained(
+            #     BYT5_REPO, tie_word_embeddings=False,
+            # )
+            # print(f"ByT5 loaded from {BYT5_REPO} (root)")
+            # Temporarily switch to "last-checkpoint" subfolder to work around
+            # an issue with the root model loading stemming from aborted training runs
+            # leaving inconsistent files in the root.
             byt5_model = T5ForConditionalGeneration.from_pretrained(
-                BYT5_REPO, tie_word_embeddings=False,
+                BYT5_REPO, subfolder="last-checkpoint", tie_word_embeddings=False,
             )
-            print(f"ByT5 loaded from {BYT5_REPO} (root)")
-
+            print(f"ByT5 loaded from {BYT5_REPO} (last checkpoint)")
+ 
         except Exception:
             # Fall back to latest checkpoint
             try:
