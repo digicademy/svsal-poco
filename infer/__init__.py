@@ -106,7 +106,7 @@ def run_pipeline(
         if boundary_model_dir is None:
             raise ValueError("Provide boundary_model or boundary_model_dir")
         print("Loading boundary classifier...")
-        canine_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
+        boundary_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
         boundary_model   = BoundaryClassifier(
             use_lexicon=(lexicon_data_path is not None),
         )
@@ -150,7 +150,7 @@ def run_pipeline(
     lines_with_boundaries = predict_boundaries(
         lines=lines,
         model=boundary_model,
-        tokenizer=canine_tokenizer,
+        tokenizer=boundary_tokenizer,
         lexicon=lexicon,
         threshold=boundary_threshold,
         context_chars=context_chars,
