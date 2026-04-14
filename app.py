@@ -4,10 +4,6 @@ Hyphenation detection and abbreviation expansion for early modern
 Spanish and Latin printed texts.
 """
 
-import sys
-# import subprocess
-# subprocess.run([sys.executable, "-m", "pip", "install", "sentencepiece"], check=True)
-
 import json
 from datetime import datetime, timezone
 import re
@@ -15,12 +11,11 @@ import tempfile
 import os
 import threading
 from pathlib import Path
-from typing import Optional
 
 import gradio as gr
 import spaces
 import torch
-from huggingface_hub import HfApi, hf_hub_download, login
+from huggingface_hub import HfApi, hf_hub_download, login, RepoFolder
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 from codecarbon import EmissionsTracker
 
@@ -53,6 +48,12 @@ _load_error    = None
 _emissions_lock   = threading.Lock()           # thread-safe updates
 _session_emissions = {"kg": 0.0, "n": 0}
 _api              = HfApi()
+
+byt5_model = None
+byt5_tokenizer = None
+boundary_model = None
+canine_tokenizer = None
+boundary_threshold = None
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +197,6 @@ def format_carbon_info(
         lines.append(f"Tracking since {accumulated['first_request'][:10]}")
     return "\n".join(lines)
 
-
 # ---------------------------------------------------------------------------
 # Model loading — happens once at Space startup, not per request
 # ---------------------------------------------------------------------------
@@ -235,21 +235,45 @@ def load_models():
         # original ByT5 uses.
         # byt5_tokenizer = AutoTokenizer.from_pretrained(BYT5_REPO)
         byt5_tokenizer = AutoTokenizer.from_pretrained("google/byt5-base")
+
         try:
+            # Try loading from repo root first (final model)
             byt5_model = T5ForConditionalGeneration.from_pretrained(
                 BYT5_REPO, tie_word_embeddings=False
             )
-            byt5_model.eval()
-        except Exception as e:
-            print(f"ByT5 model not available: {e}")
-            byt5_model = None
+            print(f"ByT5 loaded from {BYT5_REPO} (root)")
+        except Exception:
+            # Fall back to latest checkpoint
+            try:
+                entries = list(_api.list_repo_tree(
+                    BYT5_REPO, path_in_repo="checkpoints", repo_type="model",
+                ))
+                checkpoint_dirs = sorted(
+                    [e.path for e in entries
+                    if isinstance(e, RepoFolder)
+                    and e.path.startswith("checkpoints/checkpoint-")],
+                    key=lambda x: int(x.rsplit("-", 1)[-1]),
+                )
+                if not checkpoint_dirs:
+                    raise FileNotFoundError("No ByT5 model checkpoints found")
+                latest = checkpoint_dirs[-1]
+                print(f"Loading ByT5 from checkpoint: {latest}")
+                byt5_model = T5ForConditionalGeneration.from_pretrained(
+                    BYT5_REPO, subfolder=latest, tie_word_embeddings=False,
+                )
+            except Exception as e2:
+                print(f"ByT5 model not available: {e2}")
+                byt5_model = None
 
-        _models_loaded = True
+        if byt5_model is not None:
+            byt5_model.eval()
+
+        if boundary_model and byt5_model:
+            _models_loaded = True
 
     except Exception as e:
         _load_error = str(e)
         raise
-
 
 load_models()
 
@@ -417,7 +441,7 @@ def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
 # XML tab placeholder
 # ---------------------------------------------------------------------------
 
-def run_xml_pipeline(xml_file) -> Optional[str]:
+def run_xml_pipeline(xml_file) -> str | None:
     """
     Placeholder for TEI XML processing.
     Will accept a TEI XML file, strip to plaintext, run the pipeline,
