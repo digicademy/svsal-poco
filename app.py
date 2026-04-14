@@ -50,11 +50,9 @@ _session_emissions = {"kg": 0.0, "n": 0}
 _api              = HfApi()
 
 boundary_model = None
-boundary_model_local_dir = None
 boundary_tokenizer = None
 boundary_threshold = None
 byt5_model = None
-byt5_model_local_dir = None
 byt5_tokenizer = None
 
 
@@ -210,8 +208,8 @@ def load_models():
     Load both models from the Hub at Space startup.
     Called once; results are module-level globals used by all handlers.
     """
-    global boundary_model, boundary_model_local_dir, boundary_tokenizer, boundary_threshold
-    global byt5_model, byt5_model_local_dir, byt5_tokenizer
+    global boundary_model, boundary_tokenizer, boundary_threshold
+    global byt5_model, byt5_tokenizer
     global _models_loaded, _load_error
 
     try:
@@ -225,7 +223,6 @@ def load_models():
             torch.load(weights_path, map_location="cpu", weights_only=True)
         )
         boundary_model.eval()
-        boundary_model_local_dir = str(Path(weights_path).parent)
 
         threshold_path   = hf_hub_download(BOUNDARY_REPO, "threshold.json")
         boundary_threshold = json.loads(
@@ -243,11 +240,8 @@ def load_models():
 
         try:
             # Try root model first
-            byt5_model_local_dir = snapshot_download(
-                BYT5_REPO, repo_type="model",
-            )
             byt5_model = T5ForConditionalGeneration.from_pretrained(
-                byt5_model_local_dir, tie_word_embeddings=False,
+                BYT5_REPO, tie_word_embeddings=False,
             )
             print(f"ByT5 loaded from {BYT5_REPO} (root)")
 
@@ -267,18 +261,12 @@ def load_models():
                     raise FileNotFoundError("No ByT5 model checkpoints found")
                 latest = checkpoint_dirs[-1]
                 print(f"Loading ByT5 from checkpoint: {latest}")
-                byt5_model_local_dir = snapshot_download(
-                    BYT5_REPO, repo_type="model",
-                    allow_patterns=f"{latest}/**",
-                )
-                byt5_model_local_dir = str(Path(byt5_model_local_dir) / latest)
                 byt5_model = T5ForConditionalGeneration.from_pretrained(
-                    byt5_model_local_dir, tie_word_embeddings=False,
+                    BYT5_REPO, subfolder=latest, tie_word_embeddings=False,
                 )
             except Exception as e2:
                 print(f"ByT5 model not available: {e2}")
                 byt5_model = None
-                byt5_model_local_dir = None
 
         if byt5_model is not None:
             byt5_model.eval()
@@ -376,9 +364,11 @@ def expand_text(text: str) -> tuple[str, str, str]:
         run_pipeline(
             input_path=input_path,
             output_path=output_path,
-            boundary_model_dir=boundary_model_local_dir,
-            byt5_model_dir=byt5_model_local_dir,
+            boundary_model=boundary_model,
+            boundary_tokenizer=boundary_tokenizer,
             boundary_threshold=boundary_threshold,
+            byt5_model=byt5_model,
+            byt5_tokenizer=byt5_tokenizer,
             batch_size=16,
         )
 
