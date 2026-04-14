@@ -166,6 +166,16 @@ def compute_span_cer(
         model_outputs = model_outputs[:max_source_lines]
         target_corrs  = target_corrs[:max_source_lines]
 
+    # Align all three lists to the shortest length
+    n = min(len(marked_inputs), len(model_outputs), len(target_corrs))
+    if n < len(marked_inputs) or n < len(target_corrs):
+        print(f"[{_ts()}] compute_span_cer: aligning lists to shortest "
+              f"length ({n}) — inputs={len(marked_inputs)}, "
+              f"outputs={len(model_outputs)}, targets={len(target_corrs)}")
+        marked_inputs = marked_inputs[:n]
+        model_outputs = model_outputs[:n]
+        target_corrs  = target_corrs[:n]
+
     gold_all  = []
     pred_all  = []
     results   = []

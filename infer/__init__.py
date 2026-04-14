@@ -77,12 +77,17 @@ def expand_abbreviations(
 def run_pipeline(
     input_path:          str,
     output_path:         str,
-    boundary_model_dir:  str,
-    byt5_model_dir:      str,
-    lexicon_data_path:   str = None,
-    boundary_threshold:  float = None,   # None = load from threshold.json
+    boundary_model_dir:  str | None = None,
+    byt5_model_dir:      str | None = None,
+    lexicon_data_path:   str | None = None,
+    boundary_threshold:  float | None = None,   # None = load from threshold.json
     batch_size:          int   = 32,
     context_chars:       int   = 40,
+    # Pre-loaded objects — skip loading when provided
+    boundary_model:      BoundaryClassifier | None = None,
+    canine_tokenizer:    CanineTokenizer | None = None,
+    byt5_model:          T5ForConditionalGeneration | None = None,
+    byt5_tokenizer:      AutoTokenizer | None = None,
 ):
     """
     Full inference pipeline for unseen texts.
@@ -96,23 +101,31 @@ def run_pipeline(
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Load boundary classifier ---
-    print("Loading boundary classifier...")
-    canine_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
-    boundary_model   = BoundaryClassifier(use_lexicon=(lexicon_data_path is not None))
-    boundary_model.load_state_dict(
-        torch.load(f"{boundary_model_dir}/best_model.pt", map_location=device)
-    )
+    # --- Load boundary classifier (only if not provided) ---
+    if boundary_model is None:
+        if boundary_model_dir is None:
+            raise ValueError("Provide boundary_model or boundary_model_dir")
+        print("Loading boundary classifier...")
+        canine_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
+        boundary_model   = BoundaryClassifier(
+            use_lexicon=(lexicon_data_path is not None),
+        )
+        boundary_model.load_state_dict(
+            torch.load(f"{boundary_model_dir}/best_model.pt",
+                        map_location=device)
+        )
 
     # Load threshold selected during training
     if boundary_threshold is None:
-        threshold_path = Path(boundary_model_dir) / "threshold.json"
-        if threshold_path.exists():
-            boundary_threshold = json.loads(threshold_path.read_text())["threshold"]
-        else:
+        if boundary_model_dir:
+            threshold_path = Path(boundary_model_dir) / "threshold.json"
+            if threshold_path.exists():
+                boundary_threshold = json.loads(
+                    threshold_path.read_text()
+                )["threshold"]
+        if boundary_threshold is None:
             boundary_threshold = 0.6
-            print(f"No threshold.json found; using default {boundary_threshold}")
-    print(f"Boundary threshold: {boundary_threshold}")
+            print(f"No threshold found; using default {boundary_threshold}")
 
     # Optional lexicon
     lexicon = None
@@ -120,10 +133,13 @@ def run_pipeline(
         lexicon = CorpusLexicon()
         lexicon.build_from_jsonl(lexicon_data_path)
 
-    # --- Load ByT5 ---
-    print("Loading ByT5...")
-    byt5_tokenizer = AutoTokenizer.from_pretrained(byt5_model_dir)
-    byt5_model     = T5ForConditionalGeneration.from_pretrained(byt5_model_dir)
+    # --- Load ByT5 (only if not provided) ---
+    if byt5_model is None:
+        if byt5_model_dir is None:
+            raise ValueError("Provide byt5_model or byt5_model_dir")
+        print("Loading ByT5...")
+        byt5_tokenizer = AutoTokenizer.from_pretrained(byt5_model_dir)
+        byt5_model = T5ForConditionalGeneration.from_pretrained(byt5_model_dir)
 
     # --- Load and sort input lines ---
     print("Loading input lines...")
