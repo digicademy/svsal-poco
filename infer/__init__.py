@@ -85,7 +85,7 @@ def run_pipeline(
     context_chars:       int   = 40,
     # Pre-loaded objects — skip loading when provided
     boundary_model:      BoundaryClassifier | None = None,
-    canine_tokenizer:    CanineTokenizer | None = None,
+    boundary_tokenizer:  CanineTokenizer | None = None,
     byt5_model:          T5ForConditionalGeneration | None = None,
     byt5_tokenizer:      AutoTokenizer | None = None,
 ):
