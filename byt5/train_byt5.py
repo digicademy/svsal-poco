@@ -32,9 +32,16 @@ from datetime import datetime
 import numpy as np
 import torch
 import evaluate as hf_evaluate
-import wandb
 
-# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# HPC: conditionally import wandb (may run in offline mode)
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
+# HPC: Maybe we have CUDA, maybe ROC, Triton or sth.
+
 if torch.cuda.is_available() and "CUDA" in torch.cuda.get_device_name(0).upper():
       os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -91,6 +98,14 @@ def parse_args():
     p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
     p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
     p.add_argument("--attn_implementation", default=None, help="Attention backend: 'sdpa', 'flash_attention_2', or None for default")
+    p.add_argument("--gradient_checkpointing", action="store_true")
+
+   # HPC: save_total_limit for checkpoint disk management
+    p.add_argument("--save_total_limit",  type=int, default=3, help="Max checkpoints to keep on disk (oldest deleted)")
+    # HPC: eval_model_dir to point at a local model directory for eval_only
+    p.add_argument("--eval_model_dir", default=None, help="Local directory containing model to evaluate (for eval_only without Hub access)")
+
+
     data_group = p.add_mutually_exclusive_group(required=True)
     data_group.add_argument("--dataset_repo",  default=None, help="HF dataset repo id (for Hub/Jobs mode)")
     data_group.add_argument("--dataset_local", default=None, help="Local JSONL path (for local testing mode)")
@@ -318,9 +333,13 @@ def main():
         raise ValueError("--output_repo requires HF_TOKEN to be set")
 
     # Login to HugingFace Hub
-    api = HfApi() if use_hub else None
-    if args.hf_token and (args.dataset_repo or use_hub):
+    api = None
+    if use_hub:
+        if not args.hf_token:
+            raise ValueError("--output_repo requires HF_TOKEN to be set")
+        api = HfApi()
         login(token=args.hf_token)
+
 
     # --- Fail fast if GPU requested but unavailable ---
     if args.bf16 or args.fp16:
@@ -396,6 +415,17 @@ def main():
         label_pad_token_id=-100,
         pad_to_multiple_of=8,
     )
+
+    # Optional: torch.compile for fused operations across ByT5's deep encoder
+    if not args.eval_only and torch.__version__ >= "2.0":
+        try:
+            print("Compiling model with torch.compile...")
+            model = torch.compile(model)
+            print("Model compiled with torch.compile")
+        except Exception as e:
+            print(f"torch.compile failed ({e}), continuing without compilation")
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
 
     # --- Tokenize (with caching) ---
 
@@ -494,6 +524,11 @@ def main():
         training_kwargs = dict(
             output_dir=str(checkpoints_dir),
 
+            dataloader_num_workers=4,  # or args.cpus_per_task // 2
+            dataloader_pin_memory=True,  # enable on HPC (real GPU)
+            # dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
+            dataloader_prefetch_factor=2,
+
             warmup_steps=500,
             lr_scheduler_type="cosine",
             weight_decay=0.01,
@@ -527,7 +562,6 @@ def main():
             seed=args.seed,
             logging_steps=100,
             report_to="all",  # log to both console and WandB (if initialized)
-            dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
 
             # Hub integration only when use_hub is True
             push_to_hub=use_hub,
@@ -536,6 +570,17 @@ def main():
         if use_hub:
             training_kwargs["hub_strategy"] = "checkpoint"
         training_args = Seq2SeqTrainingArguments(**training_kwargs)
+
+        # Use SDPA (flash-like attention) — this is likely already the default
+        # but being explicit ensures it
+        kwargs["attn_implementation"] = args.attn_implementation or "sdpa"
+
+
+
+        # Optional: gradient checkpointing for memory savings
+        if args.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled")
 
         print("Initializing Trainer...")
         eval_size = args.cap_eval or min(10000, len(tokenized["val"]))

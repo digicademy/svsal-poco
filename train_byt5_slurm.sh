@@ -6,6 +6,9 @@
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=16
 
+export WANDB_MODE=offline
+export WANDB_DIR=/ptmp/$USER/byt5-salamanca/wandb_offline
+
 # - find suitable apptainer image, instal via venv
 #   - `module load rocm` instead of CUDA if on AMD
 #   - `pip install torch --index-url https://download.pytorch.org/whl/rocm6.x`
