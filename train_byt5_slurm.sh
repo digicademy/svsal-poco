@@ -76,8 +76,15 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Load modules (adjust to your HPC)
 # ============================================================
 
+# rocm: 6.3, 6.4, 7.0, 7.1, 7.2
+# python: condainer/0.1, python-waterboa/2024.06, 2025.06
+# tools: amduprof/5.0, 5.2, apptainer/1.4.3, datashare/0.4,
+#        git/2.50, git-lfs/3.6, libtool/2.5.3, pandoc/3.1,
+#        R/4.5, rclone/1.67.0
+
 module purge
 module load gcc/14 rocm/6.3 openmpi/5.0 # Viper: recommended by mpcdf
+module load python-waterboa/2025.06
 
 # module load python/3.11
 # module load cuda/12.1
@@ -102,9 +109,9 @@ echo "Node: $(hostname)"
 echo "GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 
 ###### Run inside apptainer:
-module load apptainer/1.4.3
+# module load apptainer/1.4.3
 # - find suitable apptainer image, install via venv
-CONTAINER="YOUR_CONTAINER"
+# CONTAINER="YOUR_CONTAINER"
 # srun apptainer exec --nv $CONTAINER python3 train_byt5.py ... 
 
 # - if multi-gpu, instead of `python ...` use either of those:
