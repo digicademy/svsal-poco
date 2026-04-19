@@ -1,14 +1,17 @@
 # Push final model to Hub
-huggingface-cli upload mpilhlt/byt5-salamanca-abbr \
-  $PTMP_BASE/output/final_model \
+hf upload \
   --repo-type model \
-  --commit-message "Final model from HPC training"
+  --commit-message "Final model from HPC training" \
+  mpilhlt/byt5-salamanca-abbr \
+  $PTMP_BASE/output/final_model \
+  /final_model
 
 # Push test breakdown
-huggingface-cli upload mpilhlt/byt5-salamanca-abbr \
+hf upload \
+  --repo-type model \
+  mpilhlt/byt5-salamanca-abbr \
   $PTMP_BASE/output/test_breakdown.json \
-  test_breakdown.json \
-  --repo-type model
+  test_breakdown.json
 
 # Upload wandb offline data (see section below)
 cd $PTMP_BASE/wandb_offline
