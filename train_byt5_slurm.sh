@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH --mail-type=none
 #SBATCH --mail-user=wagner@lhlt.mpg.de
-#SBATCH --output=/ptmp/%u/byt5-salamanca/logs/train_%j.out
-#SBATCH --error=/ptmp/%u/byt5-salamanca/logs/train_%j.err
+# #SBATCH --output=/ptmp/%u/byt5-salamanca/logs/train_%j.out
+#SBATCH --output=train_%j.out
+#SBATCH --error=/train_%j.err
 #SBATCH --job-name=byt5-train-salamanca
 #SBATCH --time=00:15:00
 #SBATCH -D ./                   # Initial working directory
@@ -73,7 +74,7 @@ mkdir -p "$WANDB_DIR"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ============================================================
-# Load modules (adjust to your HPC)
+# Load modules
 # ============================================================
 
 # rocm: 6.3, 6.4, 7.0, 7.1, 7.2
@@ -85,10 +86,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 module purge
 module load gcc/14 rocm/6.3 openmpi/5.0 # Viper: recommended by mpcdf
 module load python-waterboa/2025.06
-
-# module load python/3.11
-# module load cuda/12.1
-# module load cudnn/8.9
 
 # Activate your virtual environment
 # If using conda:
@@ -118,7 +115,7 @@ echo "GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || e
 #   - accelerate launch
 #   - torchrun
 
-srun python train_byt5.py \
+srun python byt5/train_byt5.py \
     --dataset_local "$PTMP_BASE/datasets/salamanca-abbr/data.jsonl" \
     --model_name "$PTMP_BASE/models/byt5-base" \
     --output_dir "$OUTPUT_DIR" \

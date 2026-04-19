@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --mail-type=none
 #SBATCH --mail-user=wagner@lhlt.mpg.de
-#SBATCH --output=/ptmp/%u/byt5-salamanca/logs/train_%j.out
-#SBATCH --error=/ptmp/%u/byt5-salamanca/logs/train_%j.err
+# #SBATCH --output=/ptmp/%u/byt5-salamanca/logs/train_%j.out
+#SBATCH --output=train_%j.out
+#SBATCH --error=train_%j.err
 #SBATCH --job-name=byt5-chain
-#SBATCH --time=00:15:00
 #SBATCH --time=00:12:00          # leave 3min margin
 #SBATCH --signal=B:SIGUSR1@900   # send signal 3min before wall time
 
@@ -116,7 +116,7 @@ module load gcc/14 openmpi/5.0 rocm/6.3
 echo "=== Job $SLURM_JOB_ID started at $(date) on $(hostname) ==="
 
 # -- Run training (will auto-resume from latest checkpoint) --
-srun python train_byt5.py \
+srun python byt5/train_byt5.py \
     --dataset_local "$PTMP_BASE/datasets/salamanca-abbr/data.jsonl" \
     --model_name "$PTMP_BASE/models/byt5-base" \
     --output_dir "$OUTPUT_DIR" \

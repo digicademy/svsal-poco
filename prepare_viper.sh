@@ -10,15 +10,15 @@ mkdir -p $PTMP_BASE/{models,datasets,output,cache,wandb_offline}
 pip install --user huggingface-hub wandb
 
 # Authenticate
-huggingface-cli login --token $HF_TOKEN
+hf auth login --token $HF_TOKEN
 
 # 1. Download the base model
-huggingface-cli download google/byt5-base \
+hf download google/byt5-base \
   --local-dir $PTMP_BASE/models/byt5-base \
   --local-dir-use-symlinks False
 
 # 2. Download the dataset
-huggingface-cli download mpilhlt/salamanca-abbr \
+hf download mpilhlt/salamanca-abbr \
   --repo-type dataset \
   --local-dir $PTMP_BASE/datasets/salamanca-abbr \
   --local-dir-use-symlinks False
@@ -28,7 +28,7 @@ cd $PTMP_BASE
 git clone https://github.com/digicademy/svsal-poco.git
 
 # 4. Download your existing checkpoint/model repo (for resuming the failed run)
-huggingface-cli download mpilhlt/byt5-salamanca-abbr \
+hf download mpilhlt/byt5-salamanca-abbr \
   --repo-type model \
   --local-dir $PTMP_BASE/models/byt5-salamanca-abbr-hub \
   --local-dir-use-symlinks False
