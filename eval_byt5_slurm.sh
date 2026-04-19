@@ -5,11 +5,13 @@
 #SBATCH --output=eval_%j.out
 #SBATCH --error=eval_%j.err
 #SBATCH --job-name=byt5-eval-salamanca
-#SBATCH --time=00:15:00
 #SBATCH -D ./                   # Initial working directory
 
-# #SBATCH --partition=apu         # check actual partition name
-#SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
+# --- Change the following for testing the workflow/GPU setup ---
+#SBATCH --time=23:30:00	        # apudev has walltime of 15 min, apu of 24h
+#SBATCH --partition=apu         # check actual partition name
+# #SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
+
 #SBATCH --constraint="apu"
 #SBATCH --nodes=1
 
@@ -18,6 +20,11 @@
 #SBATCH --ntasks=1              # One task
 #SBATCH --cpus-per-task=16      # 1/8 of available CPUs
 #SBATCH --mem=110000            # of 128000
+
+# --- VIPER alternative case: two APUs on a shared node ---
+# #SBATCH --gres=gpu:2            # Two GPUs
+# #SBATCH --cpus-per-task=48      # 2/8 of available CPUs
+# #SBATCH --mem=220000
 
 # ============================================================
 # Environment setup
