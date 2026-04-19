@@ -52,7 +52,7 @@ export WANDB_PROJECT=byt5-salamanca-abbr
 mkdir -p "$WANDB_DIR"
 
 # CUDA settings
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 # ============================================================
 # Load modules
