@@ -1,6 +1,5 @@
 accelerate>=1.13.0
 aiohttp==3.13.5
-amdsmi
 anyio==4.13.0
 codecarbon==3.2.6
 datasets==4.8.4
