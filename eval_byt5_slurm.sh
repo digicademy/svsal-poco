@@ -5,7 +5,7 @@
 #SBATCH --output=eval_%j.out
 #SBATCH --error=eval_%j.err
 #SBATCH --job-name=byt5-eval-salamanca
-#SBATCH -D ./                   # Initial working directory
+#SBATCH -D .                   # Initial working directory
 
 # --- Change the following for testing the workflow/GPU setup ---
 #SBATCH --time=23:30:00	        # apudev has walltime of 15 min, apu of 24h

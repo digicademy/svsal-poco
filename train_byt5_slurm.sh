@@ -3,13 +3,15 @@
 #SBATCH --mail-user=wagner@lhlt.mpg.de
 # #SBATCH --output=/ptmp/%u/byt5-salamanca/logs/train_%j.out
 #SBATCH --output=train_%j.out
-#SBATCH --error=/train_%j.err
+#SBATCH --error=train_%j.err
 #SBATCH --job-name=byt5-train-salamanca
-#SBATCH --time=00:15:00
-#SBATCH -D ./                   # Initial working directory
+#SBATCH -D .                   # Initial working directory
 
-# #SBATCH --partition=apu         # check actual partition name
-#SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
+# --- Change the following for testing the workflow/GPU setup ---
+#SBATCH --time=23:30:00	        # apudev has walltime of 15 min, apu of 24h
+#SBATCH --partition=apu         # check actual partition name
+# #SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
+
 #SBATCH --constraint="apu"
 #SBATCH --nodes=1
 
@@ -19,10 +21,9 @@
 #SBATCH --cpus-per-task=16      # 1/8 of available CPUs
 #SBATCH --mem=110000            # of 128000
 
-# --- VIPER: 2 APUs on a full node ---
-# #SBATCH --gres=gpu:2          # Two nodes
-# #SBATCH --ntasks-per-node=2   # Run one task per APU
-# #SBATCH --cpus-per-task=32    # 2/8 of available CPUs
+# --- VIPER alternative case: two APUs on a shared node ---
+# #SBATCH --gres=gpu:2            # Two GPUs
+# #SBATCH --cpus-per-task=48      # 2/8 of available CPUs
 # #SBATCH --mem=220000
 
 # --- DAIS: H200 on a shared node would be ---
@@ -128,10 +129,10 @@ srun python byt5/train_byt5.py \
     --learning_rate 1e-4 \
     --oversample_abbr 2.0 \
     --train_batch_size 64 \
+    --gradient_accumulation_steps 2 \
     --eval_batch_size 128 \
     --eval_strategy "epoch" \
     --cap_eval 1000 \
-    --gradient_accumulation_steps 2 \
     --max_input_length 256 \
     --max_target_length 192 \
     --tokenizer_num_proc 16 \

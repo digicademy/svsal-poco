@@ -130,10 +130,10 @@ srun python byt5/train_byt5.py \
     --learning_rate 1e-4 \
     --oversample_abbr 2.0 \
     --train_batch_size 64 \
+    --gradient_accumulation_steps 2 \
     --eval_batch_size 128 \
     --eval_strategy "epoch" \
     --cap_eval 1000 \
-    --gradient_accumulation_steps 2 \
     --max_input_length 256 \
     --max_target_length 192 \
     --tokenizer_num_proc 16 \
