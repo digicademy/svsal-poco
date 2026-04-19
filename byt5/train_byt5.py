@@ -54,6 +54,7 @@ from transformers import (
     Seq2SeqTrainingArguments,
     T5ForConditionalGeneration,
     TrainerCallback,
+    Trainer,
 )
 
 # HPC: only import hub utilities when needed
@@ -470,6 +471,13 @@ def main():
         label_pad_token_id=-100,
         pad_to_multiple_of=8,
     )
+
+    print(f"Number of GPUs: {torch.cuda.device_count()}")
+    print(f"Model device: {model.device}")
+    print(f"Local rank: {os.environ.get('LOCAL_RANK', 'N/A')}")
+    print(f"World size: {os.environ.get('WORLD_SIZE', 'N/A')}")
+    print(f"Is distributed: {torch.distributed.is_initialized()}")
+    print(f"Trainer is using DDP: {trainer.args.distributed_state is not None}")
 
     # Optional: torch.compile for fused operations across ByT5's deep encoder
     if not args.eval_only and torch.__version__ >= "2.0":
