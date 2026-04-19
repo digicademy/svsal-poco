@@ -111,9 +111,10 @@ fi
 # module load python/3.11 cuda/12.1 cudnn/8.9
 # source activate byt5
 module purge
-module load gcc/14 openmpi/5.0 rocm/6.3
+module load gcc/14 rocm/7.2 openmpi/5.0 # Viper: recommended by mpcdf
+module load amdprof/5.2 python-waterboa/2025.06
 
-pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
 pip install -r requirements.txt
 
 echo "=== Job $SLURM_JOB_ID started at $(date) on $(hostname) ==="
