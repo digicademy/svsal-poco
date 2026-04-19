@@ -5,7 +5,7 @@ codecarbon==3.2.6
 cryptography==46.0.6
 datasets==4.8.4
 evaluate==0.4.6
-flash-attn==2.8.3
+# flash-attn==2.8.3
 huggingface-hub==1.9.0
 jiwer==4.0.0
 joblib==1.5.3
