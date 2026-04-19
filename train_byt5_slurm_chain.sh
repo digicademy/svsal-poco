@@ -112,7 +112,7 @@ fi
 # source activate byt5
 module purge
 module load gcc/14 rocm/7.2 openmpi/5.0 # Viper: recommended by mpcdf
-module load amdprof/5.2 python-waterboa/2025.06
+module load amduprof/5.2 python-waterboa/2025.06
 
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
 pip install -r requirements.txt
