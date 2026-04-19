@@ -69,6 +69,7 @@ module load gcc/14 rocm/6.3 openmpi/5.0 # Viper: recommended by mpcdf
 module load python-waterboa/2025.06
 
 pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+pip install -r requirements.txt
 
 # ============================================================
 # Evaluation

@@ -94,7 +94,9 @@ module load python-waterboa/2025.06
 # If using venv:
 #   source $PTMP_BASE/venv/bin/activate
 #   - `pip install torch --index-url https://download.pytorch.org/whl/rocm6.3`
+
 pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+pip install -r requirements.txt
 
 # Install from the local clone:
 # pip install --no-deps $PTMP_BASE/svsal-poco
