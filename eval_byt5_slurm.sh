@@ -1,10 +1,38 @@
 #!/bin/bash
-#SBATCH --job-name=byt5-salamanca
+#SBATCH --job-name=byt5-eval-salamanca
 #SBATCH --partition=gpu          # check actual partition name
 #SBATCH --gres=gpu:a100:1
-#SBATCH --time=48:00:00
 #SBATCH --mem=64G
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --time=24:00:00
+#SBATCH --output=/ptmp/%u/byt5-salamanca/logs/eval_%j.out
+#SBATCH --error=/ptmp/%u/byt5-salamanca/logs/eval_%j.err
+
+# ============================================================
+# Environment setup
+# ============================================================
+set -euo pipefail
+
+# Point cache and checkpoint paths to scratch volume
+PTMP_BASE=/ptmp/$USER/byt5-salamanca
+OUTPUT_DIR=$PTMP_BASE/output_eval
+
+mkdir -p "$OUTPUT_DIR"
+
+# Force offline mode for all relevant libraries
+export HF_HUB_OFFLINE=1
+export HF_HOME=$PTMP_BASE/cache/huggingface
+export HF_DATASETS_CACHE=$PTMP_BASE/cache/huggingface/datasets
+export HUGGINGFACE_HUB_CACHE=$PTMP_BASE/cache/huggingface/hub
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+export WANDB_MODE=disabled
+
+# CUDA settings
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # - find suitable apptainer image, instal via venv
 #   - `module load rocm` instead of CUDA if on AMD
@@ -12,18 +40,18 @@
 module load cuda anaconda     # or whatever the center provides
 conda activate byt5           # your pre-built environment
 
-# - point cache and checkpoint paths to scratch volume
-# - handle auth via .env file instead of uv secrets
-# - if internet access is restricted:
-#   - use WANDB_MODE=offline and sync logs afterward
-#   - check HF hub functions?
+echo "Job $SLURM_JOB_ID started at $(date)"
+echo "Node: $(hostname)"
+echo "GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 
 # - if multi-gpu, instead of `python ...` use either of those:
 #   - accelerate launch
 #   - torchrun
 python train_byt5.py \
-    --dataset_repo mpilhlt/salamanca-abbr \
-    --output_repo  mpilhlt/byt5-salamanca-abbr \
+    --dataset_local "$PTMP_BASE/datasets/salamanca-abbr/data.jsonl" \
+    --output_dir "$OUTPUT_DIR" \
+    --eval_model_dir "$PTMP_BASE/models/byt5-salamanca-abbr-hub" \
+    --eval_only \
     --wandb_project byt5-salamanca-abbr \
     --wandb_entity mpilhlt \
     --epochs 10 \
@@ -36,7 +64,10 @@ python train_byt5.py \
     --gradient_accumulation_steps 2 \
     --max_input_length 256 \
     --max_target_length 192 \
-    --tokenizer_num_proc 16 \
+    --tokenizer_num_proc 8 \
     --bf16 \
     --use_cache \
-    --lang_prefix
+    --lang_prefix \
+    --seed 42
+
+echo "Eval job $SLURM_JOB_ID finished at $(date)"

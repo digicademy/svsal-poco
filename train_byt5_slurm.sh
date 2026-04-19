@@ -1,32 +1,120 @@
 #!/bin/bash
-#SBATCH --job-name=byt5-salamanca
-#SBATCH --partition=gpu          # check actual partition name
-#SBATCH --gres=gpu:a100:1
-#SBATCH --time=48:00:00
-#SBATCH --mem=64G
-#SBATCH --cpus-per-task=16
+#SBATCH --mail-type=none
+#SBATCH --mail-user=wagner@lhlt.mpg.de
+#SBATCH --output=/ptmp/%u/byt5-salamanca/logs/train_%j.out
+#SBATCH --error=/ptmp/%u/byt5-salamanca/logs/train_%j.err
+#SBATCH --job-name=byt5-train-salamanca
+#SBATCH --time=00:15:00
+#SBATCH -D ./                   # Initial working directory
 
+# #SBATCH --partition=apu         # check actual partition name
+#SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
+#SBATCH --constraint="apu"
+#SBATCH --nodes=1
+
+# --- VIPER default case: use a single APU on a shared node ---
+#SBATCH --gres=gpu:1            # One node
+#SBATCH --ntasks=1              # One task
+#SBATCH --cpus-per-task=16      # 1/8 of available CPUs
+#SBATCH --mem=110000            # of 128000
+
+# --- VIPER: 2 APUs on a full node ---
+# #SBATCH --gres=gpu:2          # Two nodes
+# #SBATCH --ntasks-per-node=2   # Run one task per APU
+# #SBATCH --cpus-per-task=32    # 2/8 of available CPUs
+# #SBATCH --mem=220000
+
+# --- DAIS: H200 on a shared node would be ---
+# #SBATCH --partition="gpu1"    # request a shared node.
+# #SBATCH --gres=gpu:h200:1     # use 1 H200.
+# #SBATCH --cpus-per-task=12    # request 1/8 of available CPUs on a H200 node.
+# #SBATCH --mem=250000          # grant the job access to 1/8 of the memory on a H200 node.
+
+# --- DAIS: 2 H200 GPUs on a shared node ---
+# #SBATCH --partition="gpu1"    # request a shared node.
+# #SBATCH --gres=gpu:h200:2     # use 2 GPU on a shared node.
+# #SBATCH --ntasks-per-node=2   # request 2 tasks on that node (1 per gpu).
+# #SBATCH --cpus-per-task=12    # request 1/8 of available CPUs on the node *per task*.
+# #SBATCH --mem=500000          # grant the job access to 2/8 of the memory on the node.
+
+# ============================================================
+# Environment setup
+# ============================================================
+set -euo pipefail
+
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+
+# Point cache and checkpoint paths to scratch volume
+PTMP_BASE=/ptmp/$USER/byt5-salamanca
+OUTPUT_DIR=$PTMP_BASE/output
+CHECKPOINTS_DIR=$OUTPUT_DIR/checkpoints
+LOG_DIR=$PTMP_BASE/logs
+
+mkdir -p "$OUTPUT_DIR" "$CHECKPOINTS_DIR" "$LOG_DIR"
+
+# Force offline mode for all relevant libraries
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+# Point HF cache to pre-downloaded location
+export HF_HOME=$PTMP_BASE/cache/huggingface
+export HF_DATASETS_CACHE=$PTMP_BASE/cache/huggingface/datasets
+export HUGGINGFACE_HUB_CACHE=$PTMP_BASE/cache/huggingface/hub
+
+# W&B in offline mode
 export WANDB_MODE=offline
-export WANDB_DIR=/ptmp/$USER/byt5-salamanca/wandb_offline
+export WANDB_DIR=$PTMP_BASE/wandb_offline
+export WANDB_ENTITY=mpilhlt
+export WANDB_PROJECT=byt5-salamanca-abbr
+mkdir -p "$WANDB_DIR"
 
-# - find suitable apptainer image, instal via venv
-#   - `module load rocm` instead of CUDA if on AMD
+# CUDA settings
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ============================================================
+# Load modules (adjust to your HPC)
+# ============================================================
+
+module purge
+module load gcc/14 rocm/6.3 openmpi/5.0 # Viper: recommended by mpcdf
+
+# module load python/3.11
+# module load cuda/12.1
+# module load cudnn/8.9
+
+# Activate your virtual environment
+# If using conda:
+#   module load anaconda          # or whatever the center provides
+#   conda activate byt5           # your pre-built environment
+# If using venv:
+#   source $PTMP_BASE/venv/bin/activate
 #   - `pip install torch --index-url https://download.pytorch.org/whl/rocm6.x`
-module load cuda anaconda     # or whatever the center provides
-conda activate byt5           # your pre-built environment
 
-# - point cache and checkpoint paths to scratch volume
-# - handle auth via .env file instead of uv secrets
-# - if internet access is restricted:
-#   - use WANDB_MODE=offline and sync logs afterward
-#   - check HF hub functions?
+# Install from the local clone:
+# pip install --no-deps $PTMP_BASE/svsal-poco
+
+# ============================================================
+# Training
+# ============================================================
+echo "Job $SLURM_JOB_ID started at $(date)"
+echo "Node: $(hostname)"
+echo "GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
+
+###### Run inside apptainer:
+module load apptainer/1.4.3
+# - find suitable apptainer image, install via venv
+CONTAINER="YOUR_CONTAINER"
+# srun apptainer exec --nv $CONTAINER python3 train_byt5.py ... 
 
 # - if multi-gpu, instead of `python ...` use either of those:
 #   - accelerate launch
 #   - torchrun
-python train_byt5.py \
-    --dataset_repo mpilhlt/salamanca-abbr \
-    --output_repo  mpilhlt/byt5-salamanca-abbr \
+
+srun python train_byt5.py \
+    --dataset_local "$PTMP_BASE/datasets/salamanca-abbr/data.jsonl" \
+    --model_name "$PTMP_BASE/models/byt5-base" \
+    --output_dir "$OUTPUT_DIR" \
     --wandb_project byt5-salamanca-abbr \
     --wandb_entity mpilhlt \
     --epochs 10 \
@@ -35,11 +123,14 @@ python train_byt5.py \
     --train_batch_size 64 \
     --eval_batch_size 128 \
     --eval_strategy "epoch" \
-    --cap_eval         1000 \
+    --cap_eval 1000 \
     --gradient_accumulation_steps 2 \
     --max_input_length 256 \
     --max_target_length 192 \
     --tokenizer_num_proc 16 \
     --bf16 \
     --use_cache \
-    --lang_prefix
+    --lang_prefix \
+    --save_total_limit 3
+
+echo "Training job $SLURM_JOB_ID finished at $(date)"

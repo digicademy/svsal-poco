@@ -1,26 +1,7 @@
 # train_byt5.py
 #
 # ByT5-base abbreviation expansion — full training script.
-#
-# Task: sequence-to-sequence expansion of marked input lines, using the same
-# examples as the boundary classifier but with the full line as input and the
-# fully expanded line as output. ByT5's byte-level tokenization allows it to
-# handle the full variety of Unicode characters in the source and target text
-# without special-casing, and to learn character-level expansion patterns.
-#
-# The script is designed to run in two modes:
-# 1) Local testing mode: specify a local JSONL path with --dataset_local and
-#    an output directory with --output_dir. No Hub integration.
-# 2) HuggingFace Hub/Jobs mode: specify a dataset repo with --dataset_repo and
-#    a model repo with --output_repo. The script will read the data
-#    from the dataset repo, train the model, and push the best checkpoint and
-#    test breakdown to the model repo at the end of training.
-#
-# The model runs as the second stage of a pipeline, following the boundary
-# classifier. The boundary classifier identifies which line pairs should be
-# concatenated before being passed to the ByT5 abbreviation expansion
-# model. The model presupposes the availability of this concatenation
-# information in inferencing.
+# Adapted for HPC/SLURM offline execution with checkpoint-resume support.
 
 import os
 import json
@@ -41,7 +22,6 @@ except ImportError:
 
 import evaluate as hf_evaluate
 
-# HPC: Maybe we have CUDA, maybe ROC, Triton or sth.
 if torch.cuda.is_available() and "CUDA" in torch.cuda.get_device_name(0).upper():
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -102,7 +82,6 @@ def parse_args():
     p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
     p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
     p.add_argument("--attn_implementation", default=None, help="Attention backend: 'sdpa', 'flash_attention_2', or None for default")
-    p.add_argument("--gradient_checkpointing", action="store_true")
 
     # HPC: save_total_limit for checkpoint disk management
     p.add_argument("--save_total_limit",  type=int, default=3, help="Max checkpoints to keep on disk (oldest deleted)")
@@ -127,16 +106,6 @@ def parse_args():
 # ---------------------------------------------------------------------------
 
 def make_tokenize_fn(tokenizer, max_input_length, max_target_length):
-    """
-    Returns a batched tokenization function for Dataset.map().
-
-    ByT5's tokenizer encodes directly to UTF-8 bytes, so Unicode
-    combining characters (macrons, brevigraphs, etc.) and the
-    ⦃⦄ delimiters are all handled correctly without special casing.
-
-    Padding is deferred to the DataCollatorForSeq2Seq, which pads
-    per-batch rather than globally — important for ByT5's long sequences.
-    """
     def tokenize(batch):
         model_inputs = tokenizer(
             batch["source"],
@@ -150,8 +119,6 @@ def make_tokenize_fn(tokenizer, max_input_length, max_target_length):
             truncation=True,
             padding=False,
         )
-        # Replace pad token id in labels with -100 so padding is
-        # excluded from the cross-entropy loss computation
         model_inputs["labels"] = [
             [(t if t != tokenizer.pad_token_id else -100) for t in ids]
             for ids in labels["input_ids"]
@@ -165,10 +132,6 @@ def make_tokenize_fn(tokenizer, max_input_length, max_target_length):
 # ---------------------------------------------------------------------------
 
 def decode_predictions(tokenizer, predictions, labels):
-    """
-    Decode token id arrays from the Trainer into strings.
-    Replaces -100 (loss-ignored positions) with pad token id first.
-    """
     predictions = np.where(
         predictions != -100, predictions, tokenizer.pad_token_id
     )
@@ -181,10 +144,10 @@ def decode_predictions(tokenizer, predictions, labels):
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint management
+# Checkpoint management — HPC local version
 # ---------------------------------------------------------------------------
 
-def find_resume_checkpoint_local(checkpoints_dir: Path) -> str | None:
+def find_local_resume_checkpoint(checkpoints_dir: Path) -> str | None:
     """
     HPC: Find the latest checkpoint in the local checkpoints directory.
     Returns the path to the latest checkpoint, or None if none found.
@@ -230,20 +193,16 @@ def find_resume_checkpoint_local(checkpoints_dir: Path) -> str | None:
 
 
 def find_resume_checkpoint_hub(api: HfApi, repo_id: str, local_dir: Path) -> str | None:
-    """
-    Check the Hub model repo for existing checkpoints.
-    If found, download the latest one and return its local path.
-    Returns None if no checkpoint exists or download fails.
-    """
+    """Original Hub-based checkpoint finder (kept for non-HPC use)."""
     try:
         entries = list(api.list_repo_tree(
             repo_id=repo_id,
-            path_in_repo="checkpoint",
+            path_in_repo="checkpoints",
             repo_type="model",
         ))
         checkpoint_dirs = sorted(
             [e.path for e in entries
-             if isinstance(e, RepoFolder) and (e.path.startswith("checkpoints/checkpoint-") or e.path.startswith("lasr-checkpoint"))],
+             if isinstance(e, RepoFolder) and e.path.startswith("checkpoints/checkpoint-")],
             key=lambda x: int(x.rsplit("-", 1)[-1]),
         )
         if not checkpoint_dirs:
@@ -272,17 +231,6 @@ def find_resume_checkpoint_hub(api: HfApi, repo_id: str, local_dir: Path) -> str
 # ---------------------------------------------------------------------------
 
 def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
-    """
-    Returns a compute_metrics function for Seq2SeqTrainer.
-
-    val_sources: the marked input strings for the val set, captured in
-    a closure. Used to compute span-level CER during validation without
-    threading extra state through the Trainer API.
-
-    Note: assumes single-GPU training (Trainer preserves val set order).
-    For multi-GPU, disable span metrics during training and run post-hoc.
-    """
-
     if cap_eval is None:
         cap_eval = len(val_sources)
 
@@ -298,7 +246,6 @@ def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
         )
 
         print(f"[{_ts()}] compute_metrics: decoding done. Starting full-line CER ...")
-        # Sample to avoid jiwer hanging on large val sets
         try:
             full_line_cer_result = cer_metric.compute(
                 predictions=decoded_preds[:cap_eval],
@@ -308,8 +255,6 @@ def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
         except ZeroDivisionError:
             full_line_cer = 0.0
 
-        # Cap val_sources to match decoded_preds length
-        # to avoid passing 314k sources when only 10k were evaluated
         capped_val_sources = val_sources[:len(decoded_preds)]
         print(f"[{_ts()}] compute_metrics: full-line CER done ({full_line_cer:.4f}). Starting span CER over {len(capped_val_sources)} sources ...")
 
@@ -333,9 +278,7 @@ def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
 
 
 # ---------------------------------------------------------------------------
-# Carbon tracking callback --- optional but
-# recommended for monitoring training emissions,
-# especially on GPU.
+# Carbon tracking callback
 # ---------------------------------------------------------------------------
 
 class CarbonTrackerCallback(TrainerCallback):
@@ -353,13 +296,11 @@ class CarbonTrackerCallback(TrainerCallback):
     def on_train_end(self, args, state, control, **kwargs):
         emissions = self.tracker.stop()
         print(f"Training CO2: {emissions:.4f} kg CO2eq")
-
-        # Write structured summary alongside other outputs
         emissions_path = self.output_dir / "emissions.json"
         emissions_path.write_text(json.dumps({
             "kg_co2eq":     emissions,
             "model":        "google/byt5-base",
-            "hardware":     "a100-large", # adapt to something else?
+            "hardware":     "hpc-gpu",
         }, indent=2, ensure_ascii=False))
 
 
@@ -439,10 +380,7 @@ def main():
         test_ex = examples
 
     # --- Load model, tokenizer and collator ---
-    # If eval_only is set, we want to load the best model from local disk
-    # or from the Hub (if available)
-    # otherwise we'll train from scratch and load the base model - 
-    # again, either from local disk or from the hub.
+    # HPC: Determine which model to load
     if args.eval_only:
         if args.eval_model_dir:
             model_id = args.eval_model_dir
@@ -471,17 +409,6 @@ def main():
         pad_to_multiple_of=8,
     )
 
-    # Optional: torch.compile for fused operations across ByT5's deep encoder
-    if not args.eval_only and torch.__version__ >= "2.0":
-        try:
-            print("Compiling model with torch.compile...")
-            model = torch.compile(model)
-            print("Model compiled with torch.compile")
-        except Exception as e:
-            print(f"torch.compile failed ({e}), continuing without compilation")
-    if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
-
     # --- Tokenize (with caching) ---
 
     tokenize_fn = make_tokenize_fn(
@@ -489,7 +416,6 @@ def main():
     )
 
     def tokenize_examples(exs: list[dict]) -> Dataset:
-        """Build a HF Dataset from raw examples and tokenize it."""
         raw = Dataset.from_dict({
             "source": [e["source"] for e in exs],
             "target": [e["target"] for e in exs],
@@ -501,48 +427,27 @@ def main():
             remove_columns=["source", "target"],
         )
 
-    # In eval-only mode, we only need the test split — no caching, no training data
     if args.eval_only:
         print("Eval-only mode: tokenizing just the test split...")
         tokenized_test = tokenize_examples(test_ex)
-
     else:
         cache_path = output_dir / "tokenized_cache"
         cache_valid = False
 
-        if args.use_cache:
-            # Try to download cache from Hub if not present locally
-            if not cache_path.exists() and use_hub:
-                try:
-                    print("Downloading tokenized cache from Hub...")
-                    snapshot_download(
-                        repo_id=args.output_repo,
-                        local_dir=str(output_dir),
-                        allow_patterns="tokenized_cache/**",
-                        repo_type="model",
-                    )
-                    if cache_path.exists():
-                        print("Cache downloaded successfully.")
-                    else:
-                        print("No cached tokenization found on Hub, will tokenize from scratch.")
-                except Exception as e:
-                    print(f"Cache download failed ({e}), will tokenize from scratch.")
-
-            # Check if cache is (now) available locally, validate it, and load if valid
-            if cache_path.exists():
-                print("Loading tokenized dataset from cache...")
-                tokenized = DatasetDict.load_from_disk(str(cache_path))
-                expected = {
-                    "train": len(train_ex),
-                    "val": len(val_ex),
-                    "test": len(test_ex),
-                }
-                actual = { split: len(tokenized[split]) for split in tokenized }
-                if actual == expected:
-                    print(f"Cache valid with splits: {actual}")
-                    cache_valid = True
-                else:
-                    print(f"Cache invalid: expected {expected}, got {actual}. Will tokenize from scratch.")
+        if args.use_cache and cache_path.exists():
+            print("Loading tokenized dataset from cache...")
+            tokenized = DatasetDict.load_from_disk(str(cache_path))
+            expected = {
+                "train": len(train_ex),
+                "val": len(val_ex),
+                "test": len(test_ex),
+            }
+            actual = { split: len(tokenized[split]) for split in tokenized }
+            if actual == expected:
+                print(f"Cache valid with splits: {actual}")
+                cache_valid = True
+            else:
+                print(f"Cache invalid: expected {expected}, got {actual}.")
 
         if not cache_valid:
             print("Tokenizing all splits from scratch ...")
@@ -554,19 +459,6 @@ def main():
             if args.use_cache:
                 tokenized.save_to_disk(str(cache_path))
                 print(f"Tokenized dataset cached to {cache_path}")
-                if use_hub:
-                    print("Uploading tokenized cache to Hub...")
-                    try:
-                        api.upload_folder(
-                            folder_path=str(cache_path),
-                            path_in_repo="tokenized_cache",
-                            repo_id=args.output_repo,
-                            repo_type="model",
-                        )
-                        print("Cache uploaded to Hub.")
-                    except Exception as e:
-                        print(f"Warning: cache upload failed ({e}). "
-                              "Training will continue.")
 
         print(f"Tokenized dataset: {tokenized}")
         tokenized_test = tokenized["test"]
@@ -574,21 +466,14 @@ def main():
     # --- Training ---
     if not args.eval_only:
 
-        # Metrics closure over val sources
         val_sources     = [e["source"] for e in val_ex]
         compute_metrics = make_compute_metrics(
             tokenizer, val_sources, args.cap_eval
         )
 
-        # Training arguments: checkpoints go into output_dir/checkpoints
         checkpoints_dir = output_dir / "checkpoints"
         training_kwargs = dict(
             output_dir=str(checkpoints_dir),
-
-            dataloader_num_workers=4,        # or args.cpus_per_task // 2
-            dataloader_pin_memory=True,      # enable on HPC (real GPU)
-            # dataloader_pin_memory=False,   # suppress pin_memory warning on CPU
-            dataloader_prefetch_factor=2,
 
             warmup_steps=500,
             lr_scheduler_type="cosine",
@@ -602,15 +487,8 @@ def main():
 
             bf16=args.bf16, # Mixed precision to save memory, as configured in command-line
             fp16=args.fp16, # A10G support bf16; use fp16=True if not available
-            # If we have to use smaller batches to avoid OOM,
-            # we have to compensate with gradient accumulation to reach
-            # an effective batch size of at least 16
-            # (gradient_accumulation_steps * batch_size = effective batch size)
             gradient_accumulation_steps=args.gradient_accumulation_steps,
 
-            # Use span CER as the model selection criterion —
-            # this focuses early stopping on expansion quality,
-            # not copying fidelity
             metric_for_best_model="eval_span_cer",
             per_device_eval_batch_size=args.eval_batch_size,
             eval_strategy=args.eval_strategy,
@@ -625,24 +503,15 @@ def main():
 
             seed=args.seed,
             logging_steps=100,
-            report_to="all",  # log to both console and WandB (if initialized)
+            report_to="all",
+            dataloader_pin_memory=False,
 
-            # Hub integration only when use_hub is True
-            push_to_hub=use_hub,
-            hub_model_id=args.output_repo if use_hub else None,
+            # HPC: disable Hub push during training (no internet)
+            push_to_hub=False,
+            hub_model_id=None,
         )
-        if use_hub:
-            training_kwargs["hub_strategy"] = "checkpoint"
+
         training_args = Seq2SeqTrainingArguments(**training_kwargs)
-
-        # Use SDPA (flash-like attention) — this is likely already the default
-        # but being explicit ensures it
-        kwargs["attn_implementation"] = args.attn_implementation or "sdpa"
-
-        # Optional: gradient checkpointing for memory savings
-        if args.gradient_checkpointing:
-            model.gradient_checkpointing_enable()
-            print("Gradient checkpointing enabled")
 
         print("Initializing Trainer...")
         eval_size = args.cap_eval or min(10000, len(tokenized["val"]))
@@ -654,9 +523,6 @@ def main():
                 range(min(eval_size, len(tokenized["val"])))
             ),
             data_collator=collator,
-            # val_sources=val_sources,
-            # cap_eval=args.cap_eval,
-            # tokenizer=tokenizer,
             compute_metrics=compute_metrics,
             callbacks=[
                 EarlyStoppingCallback(early_stopping_patience=3),
@@ -664,8 +530,8 @@ def main():
             ],
         )
 
+        # HPC: Initialize WandB in offline mode
         if HAS_WANDB:
-            print("Initializing WandB...")
             if args.wandb_key:
                 wandb.login(key=args.wandb_key)
             wandb.init(
@@ -676,14 +542,10 @@ def main():
                 mode=os.environ.get("WANDB_MODE", "online"),
             )
 
+        # HPC: find checkpoint locally instead of from Hub
         resume_checkpoint = None
         if not args.no_resume:
-            resume_checkpoint = find_resume_checkpoint_local(checkpoints_dir)
-            if not resume_checkpoint: 
-                resume_checkpoint = (
-                    find_resume_checkpoint_hub(api, args.output_repo, output_dir)
-                    if use_hub and not args.no_resume else None
-                )
+            resume_checkpoint = find_local_resume_checkpoint(checkpoints_dir)
 
         # --- Do it! ---
         print("Starting training...")
@@ -697,16 +559,9 @@ def main():
         tokenizer.save_pretrained(str(final_model_dir))
         print("Best model saved.")
 
-        # Push the best model to the Hub even before evaluation to be on the safe side
-        # in case something goes wrong during evaluation and prevents the final push
-        if use_hub:
-            print("Pushing best model to Hub...")
-            trainer.push_to_hub(commit_message="Best checkpoint after training")
-
     # --- Test evaluation (in both training and eval_only mode) ---
     test_sources = [e["source"] for e in test_ex]
 
-    # eval-only mode: we can do with light-weight trainer just for prediction
     if args.eval_only:
         eval_args = Seq2SeqTrainingArguments(
             output_dir=str(output_dir / "eval_tmp"),
@@ -770,19 +625,6 @@ def main():
             print("Model saved for upload.")
 
     print(f"All results saved to {output_dir}/")
-
-    # --- Optionally push to Hub ---
-    if use_hub:
-        print("Uploading test breakdown to Hub...")
-        api.upload_file(
-            path_or_fileobj=str(breakdown_path),
-            path_in_repo="test_breakdown.json",
-            repo_id=args.output_repo,
-            repo_type="model",
-        )
-        trainer.push_to_hub(commit_message="Training complete — best checkpoint")
-    else:
-        print(f"Results saved locally to {output_dir}/")
 
 
 if __name__ == "__main__":
