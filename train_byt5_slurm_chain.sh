@@ -113,6 +113,8 @@ fi
 module purge
 module load gcc/14 openmpi/5.0 rocm/6.3
 
+pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+
 echo "=== Job $SLURM_JOB_ID started at $(date) on $(hostname) ==="
 
 # -- Run training (will auto-resume from latest checkpoint) --
