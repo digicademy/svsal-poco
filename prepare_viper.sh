@@ -1,3 +1,7 @@
+module purge
+module load gcc/14 rocm/6.3 openmpi/5.0 # Viper: recommended by mpcdf
+module load python-waterboa/2025.06
+
 # Set up base directory
 export PTMP_BASE=/ptmp/$USER/byt5-salamanca
 mkdir -p $PTMP_BASE/{models,datasets,output,cache,wandb_offline}
