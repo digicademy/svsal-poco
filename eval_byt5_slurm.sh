@@ -113,8 +113,8 @@ srun python byt5/train_byt5.py \
     --max_target_length 192 \
     --tokenizer_num_proc 8 \
     --bf16 \
+    --marker_dropout 0.5 \
     --use_cache \
-    --lang_prefix \
     --seed 42 \
     --eval_only
 

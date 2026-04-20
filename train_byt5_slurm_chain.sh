@@ -136,6 +136,7 @@ srun python byt5/train_byt5.py \
     --cap_eval 1000 \
     --max_input_length 256 \
     --max_target_length 192 \
+    --marker_dropout 0.5 \
     --tokenizer_num_proc 16 \
     --bf16 \
     --use_cache \

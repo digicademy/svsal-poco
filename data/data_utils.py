@@ -114,6 +114,7 @@ def build_byt5_examples(
     oversample_abbr: float = 2.0,
     lang_prefix:     bool  = False,
     seed:            int   = 42,
+    marker_dropout: float = 0.5,
 ) -> list[dict]:
     """
     Construct (source, target) training pairs for ByT5.
@@ -150,6 +151,10 @@ def build_byt5_examples(
             target   = row["target_corr"]
             has_abbr = row["contains_abbr"] == "true"
             lang     = row["lang"]
+
+        # Randomly strip markers to teach marker-free detection
+        if has_abbr and marker_dropout > 0 and random.random() < marker_dropout:
+            source = source.replace(ABBR_OPEN, "").replace(ABBR_CLOSE, "")
 
         if lang_prefix:
             lang_tag = LANG_TOKENS.get(

@@ -68,6 +68,7 @@ from evaluation.evaluation import compute_span_cer, extract_cer
 cer_metric = hf_evaluate.load("cer")
 
 ABBR_OPEN = "⦃"
+ABBR_CLOSE = "⦄"   # U+2984
 
 
 def _ts():
@@ -95,6 +96,7 @@ def parse_args():
     p.add_argument("--cap_eval",          type=int,   default=None, help="Max eval samples for generation and metrics during training")
     p.add_argument("--oversample_abbr",   type=float, default=2.0)
     p.add_argument("--lang_prefix",       action="store_true")
+    p.add_argument("--marker_dropout",    type=float, default=0.5, help="Randomly drop markers in source with this probability (to teach marker-free detection)")
     p.add_argument("--seed",              type=int,   default=42)
     p.add_argument("--hf_token",          default=os.environ.get("HF_TOKEN"))
     p.add_argument("--wandb_key",         default=os.environ.get("WANDB_API_KEY"))
@@ -423,6 +425,7 @@ def main():
         oversample_abbr=args.oversample_abbr,
         lang_prefix=args.lang_prefix,
         seed=args.seed,
+        mmarker_dropout=args.marker_dropout,
     )
     print(f"Built {len(examples)} examples")
     print("Splitting dataset...")
@@ -496,10 +499,13 @@ def main():
         tokenizer, args.max_input_length, args.max_target_length,
     )
 
-    def tokenize_examples(exs: list[dict]) -> Dataset:
+    def tokenize_examples(exs, strip_markers=False) -> Dataset:
         """Build a HF Dataset from raw examples and tokenize it."""
+        sources = [e["source"] for e in exs]
+        if strip_markers:
+            sources = [s.replace(ABBR_OPEN, "").replace(ABBR_CLOSE, "") for s in sources]
         raw = Dataset.from_dict({
-            "source": [e["source"] for e in exs],
+            "source": sources,
             "target": [e["target"] for e in exs],
         })
         return raw.map(
@@ -512,7 +518,7 @@ def main():
     # In eval-only mode, we only need the test split — no caching, no training data
     if args.eval_only:
         print("Eval-only mode: tokenizing just the test split...")
-        tokenized_test = tokenize_examples(test_ex)
+        tokenized_test = tokenize_examples(test_ex, strip_markers=True)
 
     else:
         cache_path = output_dir / "tokenized_cache"
@@ -555,9 +561,9 @@ def main():
         if not cache_valid:
             print("Tokenizing all splits from scratch ...")
             tokenized = DatasetDict({
-                "train": tokenize_examples(train_ex),
-                "val":   tokenize_examples(val_ex),
-                "test":  tokenize_examples(test_ex),
+                "train": tokenize_examples(train_ex, strip_markers=False),  # markers kept (or dropped randomly via marker_dropout)
+                "val":   tokenize_examples(val_ex, strip_markers=True),     # always strip markers
+                "test":  tokenize_examples(test_ex, strip_markers=True),    # always strip markers
             })
             if args.use_cache:
                 tokenized.save_to_disk(str(cache_path))
@@ -616,17 +622,16 @@ def main():
             # (gradient_accumulation_steps * batch_size = effective batch size)
             gradient_accumulation_steps=args.gradient_accumulation_steps,
 
-            # Use span CER as the model selection criterion —
-            # this focuses early stopping on expansion quality,
-            # not copying fidelity
-            metric_for_best_model="eval_span_cer",
+            # Use full line CER as the model selection criterion — this is computed
+            # over entire lines, requires no alignment, and is a more stable signal
+            metric_for_best_model="eval_full_line_cer",
+            greater_is_better=False,
             per_device_eval_batch_size=args.eval_batch_size,
             eval_strategy=args.eval_strategy,
             eval_steps=args.eval_steps,
             save_strategy=args.eval_strategy,  # checkpoint at same frequency as eval
             save_steps=args.eval_steps,
             load_best_model_at_end=True,
-            greater_is_better=False,
 
             # HPC: save_total_limit to manage disk space
             save_total_limit=args.save_total_limit,
