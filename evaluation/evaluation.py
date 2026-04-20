@@ -4,9 +4,9 @@
 # Used by both the ByT5 training loop and post-hoc analysis.
 
 import evaluate as hf_evaluate
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from collections import defaultdict, Counter
-from typing import Optional
 from datetime import datetime
 
 cer_metric = hf_evaluate.load("cer")
@@ -22,18 +22,6 @@ def _ts():
 # ---------------------------------------------------------------------------
 
 @dataclass
-class SpanAlignment:
-    """
-    Holds the abbreviated source span, its expected expansion,
-    and the character offset in the unmarked output line where
-    the expansion begins.
-    """
-    abbr_text:     str
-    expanded_text: str
-    output_offset: int
-
-
-@dataclass
 class SpanResult:
     """Result of a single span prediction, for breakdown analysis."""
     abbr_text: str
@@ -43,85 +31,111 @@ class SpanResult:
 
 
 # ---------------------------------------------------------------------------
-# Span alignment
+# Diff-based span alignment
 # ---------------------------------------------------------------------------
 
-def extract_span_alignments(
-    marked_input: str,
-    target_corr:  str,
-) -> list[SpanAlignment]:
+def _strip_markers(marked_input: str) -> tuple[str, list[tuple[int, int, str]]]:
     """
-    Parse a marked input line to recover (abbr_text, expansion, offset) triples.
+    Remove ⦃⦄ delimiters from marked input.
 
-    marked_input: source line with ⦃...⦄ delimiters around abbreviated spans,
-                  e.g. "lib. Lex est communis ciuitatis ⦃cōsensus⦄ qui"
-    target_corr:  fully expanded gold line, e.g.
-                  "lib. Lex est communis ciuitatis consensus qui"
-
-    Walks both strings in parallel, tracking character offsets. When a
-    ⦃...⦄ span is encountered, uses a short lookahead into the context
-    after the span to locate the corresponding position in target_corr,
-    handling variable-length expansions correctly.
+    Returns:
+        plain:  the source string with delimiters removed (abbreviated
+                forms kept as-is)
+        spans:  list of (start, end, abbr_text) tuples giving the
+                position of each abbreviated span in the plain string
     """
-    alignments = []
-
-    if ABBR_OPEN not in marked_input:
-        return alignments
-
-    i          = 0
-    out_offset = 0
+    parts: list[str] = []
+    spans: list[tuple[int, int, str]] = []
+    pos = 0
+    i   = 0
 
     while i < len(marked_input):
         if marked_input[i] == ABBR_OPEN:
-            try:
-                close = marked_input.index(ABBR_CLOSE, i)
-            except ValueError:
-                # Malformed input: opening delimiter without closing one
-                # Skip the rest of this line
+            close = marked_input.find(ABBR_CLOSE, i + 1)
+            if close == -1:
+                # Malformed: unclosed delimiter — treat rest as literal
+                parts.append(marked_input[i:])
+                pos += len(marked_input) - i
                 break
-
-            abbr_text = marked_input[i+1:close]
-            after     = marked_input[close+1:close+6]   # 5-char lookahead
-
-            exp_end = out_offset
-            while exp_end < len(target_corr):
-                if target_corr[exp_end:exp_end+len(after)] == after:
-                    break
-                exp_end += 1
-
-            alignments.append(SpanAlignment(
-                abbr_text=abbr_text,
-                expanded_text=target_corr[out_offset:exp_end],
-                output_offset=out_offset,
-            ))
-            out_offset = exp_end
-            i          = close + 1
-
-        elif marked_input[i] not in (ABBR_OPEN, ABBR_CLOSE):
-            i          += 1
-            out_offset += 1
+            abbr_text = marked_input[i + 1 : close]
+            start = pos
+            parts.append(abbr_text)
+            pos += len(abbr_text)
+            spans.append((start, pos, abbr_text))
+            i = close + 1
+        elif marked_input[i] == ABBR_CLOSE:
+            # Stray close delimiter — skip silently
+            i += 1
         else:
+            parts.append(marked_input[i])
+            pos += 1
             i += 1
 
-    return alignments
+    return "".join(parts), spans
 
 
-def extract_predicted_spans(
-    model_output: str,
-    alignments:   list[SpanAlignment],
+def _build_char_alignment(source: str, target: str) -> list[int]:
+    """
+    Build a boundary-position map from source to target using
+    SequenceMatcher.
+
+    Returns a list of len(source)+1 integers.  pos_map[i] is the
+    target position corresponding to the boundary before source[i].
+    pos_map[len(source)] is the target position after the last
+    aligned character.
+
+    For 'equal' regions the mapping is 1:1.
+    For 'replace' regions the start maps to start and end to end.
+    For 'delete' regions all positions map to the single target
+    position where the deletion occurs.
+    """
+    sm = SequenceMatcher(None, source, target, autojunk=False)
+    pos_map = [0] * (len(source) + 1)
+
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            for k in range(i2 - i1 + 1):
+                if i1 + k <= len(source):
+                    pos_map[i1 + k] = j1 + k
+
+        elif op == "replace":
+            pos_map[i1] = j1
+            if i2 <= len(source):
+                pos_map[i2] = j2
+            # Interior positions — proportional (rarely needed,
+            # since span boundaries normally fall at opcode edges)
+            src_len = i2 - i1
+            tgt_len = j2 - j1
+            for k in range(1, src_len):
+                if i1 + k <= len(source):
+                    pos_map[i1 + k] = j1 + int(k * tgt_len / src_len)
+
+        elif op == "delete":
+            for k in range(i2 - i1 + 1):
+                if i1 + k <= len(source):
+                    pos_map[i1 + k] = j1
+
+        # 'insert': no source positions consumed; adjacent opcodes
+        # already cover the boundary.
+
+    return pos_map
+
+
+def _map_spans(
+    spans:   list[tuple[int, int, str]],
+    pos_map: list[int],
+    text:    str,
 ) -> list[str]:
     """
-    Extract what the model produced at each span position,
-    using stored offsets from extract_span_alignments.
+    Extract substrings from *text* corresponding to each span,
+    using the source→text position map.
     """
-    spans = []
-    for a in alignments:
-        end  = a.output_offset + len(a.expanded_text)
-        pred = (model_output[a.output_offset:end]
-                if end <= len(model_output)
-                else model_output[a.output_offset:])
-        spans.append(pred)
-    return spans
+    result: list[str] = []
+    for s_start, s_end, _ in spans:
+        t_start = pos_map[s_start]
+        t_end   = pos_map[min(s_end, len(pos_map) - 1)]
+        result.append(text[t_start:t_end])
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -145,10 +159,14 @@ def compute_span_cer(
     model_outputs:     list[str],
     target_corrs:      list[str],
     include_breakdown: bool = True,
-    max_source_lines:  int | None = None,   # None = no cap, process all
+    max_source_lines:  int | None = None,
 ) -> dict:
     """
     Compute evaluation metrics over abbreviated spans and full lines.
+
+    Uses diff-based alignment to robustly map abbreviation spans
+    (delimited by ⦃⦄ in marked_inputs) to the corresponding regions
+    in target_corrs (gold) and model_outputs (predicted).
 
     Returns:
         span_cer:          CER over abbreviated spans only
@@ -176,26 +194,39 @@ def compute_span_cer(
         model_outputs = model_outputs[:n]
         target_corrs  = target_corrs[:n]
 
-    gold_all  = []
-    pred_all  = []
-    results   = []
+    gold_all:  list[str] = []
+    pred_all:  list[str] = []
+    results:   list[SpanResult] = []
 
-    print(f"[{_ts()}] compute_span_cer: starting span alignment loop over {len(marked_inputs)} inputs ...")
+    print(f"[{_ts()}] compute_span_cer: starting span alignment loop "
+          f"over {len(marked_inputs)} inputs ...")
+
     for marked, output, target in zip(marked_inputs, model_outputs, target_corrs):
         if ABBR_OPEN not in marked:
             continue
-        alignments = extract_span_alignments(marked, target)
-        predicted  = extract_predicted_spans(output, alignments)
-        for a, p in zip(alignments, predicted):
-            gold_all.append(a.expanded_text)
+
+        plain, spans = _strip_markers(marked)
+        if not spans:
+            continue
+
+        gold_map = _build_char_alignment(plain, target)
+        pred_map = _build_char_alignment(plain, output)
+
+        golds = _map_spans(spans, gold_map, target)
+        preds = _map_spans(spans, pred_map, output)
+
+        for (_, _, abbr_text), g, p in zip(spans, golds, preds):
+            gold_all.append(g)
             pred_all.append(p)
             results.append(SpanResult(
-                abbr_text=a.abbr_text,
-                gold=a.expanded_text,
+                abbr_text=abbr_text,
+                gold=g,
                 predicted=p,
-                exact=(p == a.expanded_text),
+                exact=(p == g),
             ))
-    print(f"[{_ts()}] compute_span_cer: span alignment done, {len(pred_all)} spans found.")
+
+    print(f"[{_ts()}] compute_span_cer: span alignment done, "
+          f"{len(pred_all)} spans found.")
 
     n_spans = len(gold_all)
     if n_spans == 0:
@@ -211,25 +242,27 @@ def compute_span_cer(
 
     n_exact = sum(r.exact for r in results)
 
-    print(f"[{_ts()}] compute_span_cer: exact match computed, starting span CER over {n_spans} spans ...")
+    print(f"[{_ts()}] compute_span_cer: exact match computed, "
+          f"starting span CER over {n_spans} spans ...")
     try:
-        span_cer_result = cer_metric.compute(
-            predictions=pred_all,
-            references=gold_all,
+        span_cer = extract_cer(
+            cer_metric.compute(predictions=pred_all, references=gold_all)
         )
-        span_cer = extract_cer(span_cer_result) if span_cer_result else 0.0
     except ZeroDivisionError:
         span_cer = 0.0
-    print(f"[{_ts()}] compute_span_cer: span CER done ({span_cer:.4f}). Starting full-line CER over {len(model_outputs)} lines...")
+
+    print(f"[{_ts()}] compute_span_cer: span CER done ({span_cer:.4f}). "
+          f"Starting full-line CER over {len(model_outputs)} lines...")
     try:
-        full_line_cer_result = cer_metric.compute(
-            predictions=model_outputs,
-            references=target_corrs,
+        full_line_cer = extract_cer(
+            cer_metric.compute(predictions=model_outputs, references=target_corrs)
         )
-        full_line_cer = extract_cer(full_line_cer_result) if full_line_cer_result else 0.0
     except ZeroDivisionError:
         full_line_cer = 0.0
-    print(f"cer_metric.compute() done. Span CER: {span_cer:.4f}, Full Line CER: {full_line_cer:.4f}, Exact Match: {n_exact}/{n_spans} ({n_exact/n_spans:.2%})")
+
+    print(f"cer_metric.compute() done. Span CER: {span_cer:.4f}, "
+          f"Full Line CER: {full_line_cer:.4f}, "
+          f"Exact Match: {n_exact}/{n_spans} ({n_exact/n_spans:.2%})")
 
     return {
         "span_cer":         span_cer,
@@ -252,8 +285,7 @@ def build_type_breakdown(results: list[SpanResult]) -> dict:
         exact_match: exact match rate
         cer:         CER over this type's predictions
         errors:      up to 20 (predicted, gold) error pairs
-        expansions:  Counter of gold expansions seen for this abbr_text,
-                     useful for spotting genuine ambiguity in the corpus
+        expansions:  Counter of gold expansions seen for this abbr_text
     """
     grouped: dict = defaultdict(list)
     for r in results:
@@ -268,9 +300,10 @@ def build_type_breakdown(results: list[SpanResult]) -> dict:
         preds   = [r.predicted for r in type_results]
         golds   = [r.gold      for r in type_results]
 
-        # Guard against empty strings causing ZeroDivisionError in CER
         try:
-            type_cer: float = extract_cer(cer_metric.compute(predictions=preds, references=golds))
+            type_cer: float = extract_cer(
+                cer_metric.compute(predictions=preds, references=golds)
+            )
         except ZeroDivisionError:
             type_cer = 0.0
 
