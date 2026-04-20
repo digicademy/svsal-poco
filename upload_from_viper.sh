@@ -13,13 +13,21 @@ pip install --user huggingface-hub wandb
 hf auth login --token $HF_TOKEN
 wandb login
 
-# Push final model to Hub
+# Push final model to Hub (final_model folder)
 hf upload \
   --repo-type model \
-  --commit-message "Final model from HPC training" \
+  --commit-message "Final model from HPC training (subfolder)" \
   mpilhlt/byt5-salamanca-abbr \
   $PTMP_BASE/output/final_model \
   /final_model
+
+# Push final model to Hub (root)
+hf upload \
+  --repo-type model \
+  --commit-message "Final model from HPC training (root)" \
+  mpilhlt/byt5-salamanca-abbr \
+  $PTMP_BASE/output/final_model \
+  /
 
 # Push test breakdown
 hf upload \
