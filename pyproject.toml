@@ -16,7 +16,6 @@ dependencies = [
     "wandb>=0.16.0",
     # "flash-attn",
     "sentencepiece",
-    "difflib",
 ]
 
 [build-system]
