@@ -104,7 +104,7 @@ def parse_args():
     p.add_argument("--wandb_entity",      default=os.environ.get("WANDB_ENTITY", None))
     p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
     p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
-    p.add_argument("--attn_implementation", default=None, help="Attention backend: 'sdpa', 'flash_attention_2', or None for default")
+    p.add_argument("--attn_implementation", default="sdpa", help="Attention backend: 'sdpa' (default), 'flash_attention_2', or None")
     p.add_argument("--gradient_checkpointing", action="store_true")
 
     # HPC: save_total_limit for checkpoint disk management
@@ -241,12 +241,12 @@ def find_resume_checkpoint_hub(api: HfApi, repo_id: str, local_dir: Path) -> str
     try:
         entries = list(api.list_repo_tree(
             repo_id=repo_id,
-            path_in_repo="checkpoint",
+            path_in_repo="checkpoints",
             repo_type="model",
         ))
         checkpoint_dirs = sorted(
             [e.path for e in entries
-             if isinstance(e, RepoFolder) and (e.path.startswith("checkpoints/checkpoint-") or e.path.startswith("lasr-checkpoint"))],
+             if isinstance(e, RepoFolder) and (e.path.startswith("checkpoints/checkpoint-") or e.path.startswith("last-checkpoint"))],
             key=lambda x: int(x.rsplit("-", 1)[-1]),
         )
         if not checkpoint_dirs:
@@ -362,7 +362,7 @@ class CarbonTrackerCallback(TrainerCallback):
         emissions_path.write_text(json.dumps({
             "kg_co2eq":     emissions,
             "model":        "google/byt5-base",
-            "hardware":     "a100-large", # adapt to something else?
+            "hardware":     torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         }, indent=2, ensure_ascii=False))
 
 
@@ -425,7 +425,7 @@ def main():
         oversample_abbr=args.oversample_abbr,
         lang_prefix=args.lang_prefix,
         seed=args.seed,
-        mmarker_dropout=args.marker_dropout,
+        marker_dropout=args.marker_dropout,
     )
     print(f"Built {len(examples)} examples")
     print("Splitting dataset...")
@@ -463,6 +463,7 @@ def main():
     print(f"Loading model from {model_id} ...")
     kwargs = dict(tie_word_embeddings=False)
     if args.attn_implementation:
+        # Use SDPA (flash-like attention) — this is likely already the default but being explicit ensures it
         kwargs["attn_implementation"] = args.attn_implementation
     model = T5ForConditionalGeneration.from_pretrained(model_id, **kwargs)
     print(f"Model loaded from: {model_id}")
@@ -479,8 +480,7 @@ def main():
     print(f"Model device: {model.device}")
     print(f"Local rank: {os.environ.get('LOCAL_RANK', 'N/A')}")
     print(f"World size: {os.environ.get('WORLD_SIZE', 'N/A')}")
-    print(f"Is distributed: {torch.distributed.is_initialized()}")
-    print(f"Trainer is using DDP: {trainer.args.distributed_state is not None}")
+    print(f"Is distributed: {torch.distributed.is_initialized() if torch.distributed.is_available() else False}")
 
     # Optional: torch.compile for fused operations across ByT5's deep encoder
     if not args.eval_only and torch.__version__ >= "2.0":
@@ -490,8 +490,6 @@ def main():
             print("Model compiled with torch.compile")
         except Exception as e:
             print(f"torch.compile failed ({e}), continuing without compilation")
-    if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
 
     # --- Tokenize (with caching) ---
 
@@ -648,10 +646,6 @@ def main():
             training_kwargs["hub_strategy"] = "checkpoint"
         training_args = Seq2SeqTrainingArguments(**training_kwargs)
 
-        # Use SDPA (flash-like attention) — this is likely already the default
-        # but being explicit ensures it
-        kwargs["attn_implementation"] = args.attn_implementation or "sdpa"
-
         # Optional: gradient checkpointing for memory savings
         if args.gradient_checkpointing:
             model.gradient_checkpointing_enable()
@@ -667,15 +661,13 @@ def main():
                 range(min(eval_size, len(tokenized["val"])))
             ),
             data_collator=collator,
-            # val_sources=val_sources,
-            # cap_eval=args.cap_eval,
-            # tokenizer=tokenizer,
             compute_metrics=compute_metrics,
             callbacks=[
                 EarlyStoppingCallback(early_stopping_patience=3),
                 CarbonTrackerCallback(str(output_dir)),
             ],
         )
+        print(f"Trainer is using DDP: {trainer.args.distributed_state is not None}")
 
         if HAS_WANDB:
             print("Initializing WandB...")
@@ -733,6 +725,8 @@ def main():
             model=model, args=eval_args,
             data_collator=collator,
         )
+        print(f"Trainer is using DDP: {trainer.args.distributed_state is not None}")
+
 
     print("Running test evaluation. Predicting...")
     test_output = trainer.predict(tokenized_test)

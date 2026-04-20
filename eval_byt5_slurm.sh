@@ -84,6 +84,7 @@ pip install -r requirements.txt
 echo "Job $SLURM_JOB_ID started at $(date)"
 echo "Node: $(hostname)"
 echo "GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
+echo "GPU:  $(rocm-smi --showproductname 2>/dev/null || echo 'N/A')"
 
 ###### Run inside apptainer:
 # module load apptainer/1.4.3
