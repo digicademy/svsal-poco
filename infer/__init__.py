@@ -82,6 +82,7 @@ def run_pipeline(
     lexicon_data_path:   str | None = None,
     boundary_threshold:  float | None = None,   # None = load from threshold.json
     batch_size:          int   = 32,
+    lang_prefix:         bool  = False,
     context_chars:       int   = 40,
     # Pre-loaded objects — skip loading when provided
     boundary_model:      BoundaryClassifier | None = None,
@@ -176,6 +177,9 @@ def run_pipeline(
         else:
             source   = row["source_sic"]
             line_ids = [row["id"]]
+
+        if lang_prefix:
+            source = "[LA] " + source
 
         byt5_examples.append({"source": source, "line_ids": line_ids})
 
