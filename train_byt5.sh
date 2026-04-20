@@ -37,8 +37,7 @@ hf jobs uv run \
       --max_target_length 192 \
       --tokenizer_num_proc 16 \
       --bf16 \
-      --use_cache \
-      --lang_prefix
+      --use_cache
 
 # If OOM: reduce batch_size to from — and preserve effective batch size
 # by increasing gradient_accumulation_steps.

@@ -138,7 +138,6 @@ srun python byt5/train_byt5.py \
     --tokenizer_num_proc 16 \
     --bf16 \
     --use_cache \
-    --lang_prefix \
     --save_total_limit 3
 
 echo "Training job $SLURM_JOB_ID finished at $(date)"

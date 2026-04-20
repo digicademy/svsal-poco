@@ -165,6 +165,4 @@ for a classification task, which is unnecessarily complex here.
 
 - Canine-based abbreviation expansion (encoder + character decoder head):
   implement after establishing ByT5-base results as a baseline
-- Language-conditioned training ablation (--lang_prefix flag exists but
-  effect is not yet measured)
 - Multi-GPU training support for span metrics in compute_metrics callback
