@@ -29,7 +29,14 @@ hf upload \
   $PTMP_BASE/output/final_model \
   /
 
-# Push test breakdown
+# Push test metrics
+hf upload \
+  --repo-type model \
+  mpilhlt/byt5-salamanca-abbr \
+  $PTMP_BASE/output/test_metrics.json \
+  test_metrics.json
+
+# Push test breakdown per abbreviation
 hf upload \
   --repo-type model \
   mpilhlt/byt5-salamanca-abbr \
