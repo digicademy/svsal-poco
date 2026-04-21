@@ -26,7 +26,7 @@ from codecarbon import EmissionsTracker
 # ---------------------------------------------------------------------------
 from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_boundaries
 from data.data_utils import (
-    ABBR_OPEN, ABBR_CLOSE, LINE_SEP,
+    ABBR_OPEN, ABBR_CLOSE, LINE_SEP, LINE_BREAK,
     CorpusLexicon,
 )
 from infer import run_pipeline
@@ -42,6 +42,7 @@ EMISSIONS_REPO      = os.environ.get("SPACE_ID", "awagner-mainz/svsal-poco")
 EMISSIONS_REPO_TYPE = "space"
 EMISSIONS_FILE      = "inference_emissions.json"
 _UPLOAD_EVERY_N     = 10
+NONBREAKING_MARKER    = "¬"   # appended to lines where boundary classifier predicts nonbreaking
 
 _models_loaded = False
 _load_error    = None
@@ -336,12 +337,11 @@ def classify_boundaries_only(text: str) -> str:
     id_list    = [r["id"] for r in result]
 
     output_lines = []
-    for i, (line, row_id) in enumerate(zip(lines, id_list)):
-        output_lines.append(line)
+    for line, row_id in zip(lines, id_list):
         if row_id in nonbreaking:
-            # Mark the boundary visually — word continues on next line
-            output_lines.append("    ↪ [continues →]")
-
+            output_lines.append(line + NONBREAKING_MARKER)
+        else:
+            output_lines.append(line)
     return "\n".join(output_lines)
 
 
@@ -392,7 +392,17 @@ def expand_text(text: str) -> tuple[str, str, str]:
     expanded = "\n".join(r.get("expanded_text", r["source_sic"]) for r in out_rows)
 
     # --- Boundary annotation ---
-    boundaries = classify_boundaries_only(text)
+    nonbreaking_ids = {
+        r["id"] for r in out_rows
+        if r.get("predicted_nonbreaking_next_line", "")
+    }
+    boundary_lines = []
+    for r in out_rows:
+        line = r["source_sic"]
+        if r["id"] in nonbreaking_ids:
+            line += NONBREAKING_MARKER
+        boundary_lines.append(line)
+    boundaries = "\n".join(boundary_lines)
 
     # --- Diff: lines that changed ---
     diff_lines = []
