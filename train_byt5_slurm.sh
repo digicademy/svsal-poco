@@ -1,4 +1,12 @@
 #!/bin/bash
+#
+# Useful commands for running this training script:
+# sbatch train_byt5_slurm.sh      - runs the command in the slurm system, yields the job number
+# scontrol show job <job>         - lists information about the job
+# squeue | grep <username>        - shows all jobs of the user with current queueing status
+# tail -f train_<job>.{err,out}   - monitors stderr and stdout of the job
+#
+#
 #SBATCH --mail-type=none
 #SBATCH --mail-user=wagner@lhlt.mpg.de
 # #SBATCH --output=/ptmp/%u/byt5-salamanca/logs/train_%j.out

@@ -29,10 +29,10 @@ hf download \
   google/byt5-base
 
 # 5. Download your existing checkpoint/model repo (for resuming the failed run)
-hf download \
-  --repo-type model \
-  --local-dir $PTMP_BASE/models/byt5-salamanca-abbr-hub \
-  mpilhlt/byt5-salamanca-abbr
+# hf download \
+#   --repo-type model \
+#   --local-dir $PTMP_BASE/models/byt5-salamanca-abbr-hub \
+#   mpilhlt/byt5-salamanca-abbr
 
 # 6. Download the evaluate metric (CER) for offline use
 # This pre-caches the metric module
