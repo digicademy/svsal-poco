@@ -15,8 +15,9 @@ from typing import Optional
 
 ABBR_OPEN  = "⦃"   # U+2983 — wraps abbreviated span in source_sic
 ABBR_CLOSE = "⦄"   # U+2984
-LINE_SEP   = "↵"   # U+21B5 — marks concatenated nonbreaking line boundary
-LANG_TOKENS = {"la": "[LA]", "es": "[ES]", "default": "[LA]"}
+# LINE_SEP   = "↵"   # U+21B5 — marks concatenated nonbreaking line boundary
+LINE_BREAK = "¬"   # U+00AC — nonbreaking: word continues across this boundary
+LINE_SEP   = "↵"   # U+21B5 — breaking: normal line boundary, no word continuation
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +174,30 @@ def build_byt5_examples(
 
             window = doc_lines[ctx_start:ctx_end]
 
-            source = LINE_SEP.join(r["source_sic"] for r in window)
-            target = LINE_SEP.join(r["target_corr"] for r in window)
+            # Join lines with the appropriate separator
+            parts = []
+            for j, r in enumerate(window):
+                parts.append(r["source_sic"])
+                if j < len(window) - 1:
+                    next_r = window[j + 1]
+                    if r.get("nonbreaking_next_line", "") == next_r["id"]:
+                        parts.append(LINE_SEP)     # word continues
+                    else:
+                        parts.append(LINE_BREAK)   # normal break
+            source = "".join(parts)
+
+            # Same for target
+            target_parts = []
+            for j, r in enumerate(window):
+                target_parts.append(r["target_corr"])
+                if j < len(window) - 1:
+                    next_r = window[j + 1]
+                    if r.get("nonbreaking_next_line", "") == next_r["id"]:
+                        target_parts.append(LINE_SEP)
+                    else:
+                        target_parts.append(LINE_BREAK)
+            target = "".join(target_parts)
+
             has_abbr = any(r["contains_abbr"] == "true" for r in window)
             lang = row["lang"]
 

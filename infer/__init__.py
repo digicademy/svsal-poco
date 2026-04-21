@@ -19,7 +19,7 @@ from pathlib import Path
 from collections import defaultdict
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 
-from data.data_utils import load_and_sort_lines, CorpusLexicon, ABBR_OPEN, ABBR_CLOSE, LINE_SEP
+from data.data_utils import load_and_sort_lines, CorpusLexicon, ABBR_OPEN, ABBR_CLOSE, LINE_SEP, LINE_BREAK
 from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_boundaries
 
 
@@ -303,9 +303,18 @@ def run_pipeline(
     byt5_examples = []
     for window in windows:
         indices = window["line_indices"]
-        source = LINE_SEP.join(
-            lines_with_boundaries[i]["source_sic"] for i in indices
-        )
+        parts = []
+        for j, idx in enumerate(indices):
+            parts.append(lines_with_boundaries[idx]["source_sic"])
+            if j < len(indices) - 1:
+                current = lines_with_boundaries[idx]
+                next_id = lines_with_boundaries[indices[j + 1]]["id"]
+                if current.get("predicted_nonbreaking_next_line", "") == next_id:
+                    parts.append(LINE_SEP)
+                else:
+                    parts.append(LINE_BREAK)
+        source = "".join(parts)
+
         byt5_examples.append({
             "source":   source,
             "window":   window,
