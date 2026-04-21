@@ -8,23 +8,24 @@
 #SBATCH -D .                   # Initial working directory
 
 # --- Change the following for testing the workflow/GPU setup ---
-#SBATCH --time=23:30:00	        # apudev has walltime of 15 min, apu of 24h
-#SBATCH --partition=apu         # check actual partition name
-# #SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
+#SBATCH --time=00:12:00         # apudev has walltime of 15 min, apu of 24h
+# #SBATCH --partition=apu         # check actual partition name
+#SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
 
 #SBATCH --constraint="apu"
 #SBATCH --nodes=1
 
 # --- VIPER default case: use a single APU on a shared node ---
-#SBATCH --gres=gpu:1            # One node
-#SBATCH --ntasks=1              # One task
-#SBATCH --cpus-per-task=16      # 1/8 of available CPUs
-#SBATCH --mem=110000            # of 128000
+# #SBATCH --gres=gpu:1            # One node
+# #SBATCH --ntasks=1              # One task
+# #SBATCH --cpus-per-task=16      # 1/8 of available CPUs
+# #SBATCH --mem=110000            # of 128000
 
 # --- VIPER alternative case: two APUs on a shared node ---
-# #SBATCH --gres=gpu:2            # Two GPUs
-# #SBATCH --cpus-per-task=48      # 2/8 of available CPUs
-# #SBATCH --mem=220000
+#SBATCH --gres=gpu:2            # Two GPUs
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=220000
 
 # --- DAIS: H200 on a shared node would be ---
 # #SBATCH --partition="gpu1"    # request a shared node.
@@ -116,7 +117,7 @@ echo "GPU:  $(rocm-smi --showproductname 2>/dev/null || echo 'N/A')"
 # CONTAINER="YOUR_CONTAINER"
 # srun apptainer exec --nv $CONTAINER python3 train_byt5.py ... 
 
-# - if multi-gpu, instead of `python ...` use either of those:
+# - if multi-node, instead of `python ...` use either of those:
 #   - accelerate launch
 #   - torchrun
 
@@ -129,16 +130,17 @@ srun python byt5/train_byt5.py \
     --epochs 10 \
     --learning_rate 1e-4 \
     --oversample_abbr 2.0 \
-    --train_batch_size 64 \
+    --train_batch_size 32 \
     --gradient_accumulation_steps 2 \
-    --eval_batch_size 128 \
+    --eval_batch_size 64 \
     --eval_strategy "epoch" \
     --cap_eval 1000 \
-    --max_input_length 256 \
-    --max_target_length 192 \
+    --max_input_length 512 \
+    --max_target_length 384 \
+    --tokenizer_num_proc 16 \
     --attn_implementation "sdpa" \
     --marker_dropout 0.5 \
-    --tokenizer_num_proc 16 \
+    --context_lines 1 \
     --bf16 \
     --use_cache \
     --save_total_limit 3
