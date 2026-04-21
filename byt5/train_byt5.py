@@ -22,30 +22,44 @@
 # model. The model presupposes the availability of this concatenation
 # information in inferencing.
 
+import sys
+print("Starting imports...", flush=True)
+
 import os
+print("os ok", flush=True)
+
 import json
+print("json ok", flush=True)
+
 import random
 import argparse
 from pathlib import Path
 from datetime import datetime
 
 import numpy as np
+print("numpy ok", flush=True)
+
 import torch
+print("torch ok", flush=True)
 
 # HPC: conditionally import wandb (may run in offline mode)
 try:
     import wandb
     HAS_WANDB = True
+    print("wandb ok", flush=True)
 except ImportError:
     HAS_WANDB = False
 
 import evaluate as hf_evaluate
+print("evaluate ok", flush=True)
+
+from datasets import Dataset, DatasetDict
+print("datasets ok", flush=True)
 
 # HPC: Maybe we have CUDA, maybe ROC, Triton or sth.
 if torch.cuda.is_available() and "CUDA" in torch.cuda.get_device_name(0).upper():
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
     DataCollatorForSeq2Seq,
@@ -56,14 +70,19 @@ from transformers import (
     TrainerCallback,
     Trainer,
 )
+print("transformers ok", flush=True)
 
-# HPC: only import hub utilities when needed
 from huggingface_hub import login, HfApi, hf_hub_download, RepoFolder, snapshot_download
+print("huggingface_hub ok", flush=True)
 
 from codecarbon import EmissionsTracker
+print("codecarbon ok", flush=True)
 
 from data.data_utils import load_and_sort_lines, build_byt5_examples, document_split
+print("data_utils ok", flush=True)
+
 from evaluation.evaluation import compute_span_cer, extract_cer
+print("evaluation ok", flush=True)
 
 _cer_metric = None
 def get_cer_metric():
