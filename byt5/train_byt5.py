@@ -421,8 +421,8 @@ def main():
     lines = load_and_sort_lines(data_path)
     print(f"Loaded {len(lines)} lines from {data_path}")
     print("Building examples...")
-    import data.data_utils as du
-    print(f"    data_utils loaded from: {du.__file__}")
+    # import data.data_utils as du
+    # print(f"    data_utils loaded from: {du.__file__}")
     examples = build_byt5_examples(
         lines,
         oversample_abbr=args.oversample_abbr,
