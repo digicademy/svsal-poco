@@ -51,3 +51,6 @@ pip download -d $PTMP_BASE/wheels \
   'transformers>=4.40.0' 'datasets>=2.18.0' 'evaluate>=0.4.0' \
   'scikit-learn>=1.3.0' 'accelerate>=1.1.0' \
   jiwer tensorboard wandb codecarbon
+
+# Clean up stale lock files from previous killed jobs
+find $PTMP_BASE/cache -name "*.lock" -delete 2>/dev/null
