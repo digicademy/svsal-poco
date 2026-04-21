@@ -65,7 +65,12 @@ from codecarbon import EmissionsTracker
 from data.data_utils import load_and_sort_lines, build_byt5_examples, document_split
 from evaluation.evaluation import compute_span_cer, extract_cer
 
-cer_metric = hf_evaluate.load("cer")
+_cer_metric = None
+def get_cer_metric():
+    global _cer_metric
+    if _cer_metric is None:
+        _cer_metric = hf_evaluate.load("cer")
+    return _cer_metric
 
 ABBR_OPEN = "⦃"
 ABBR_CLOSE = "⦄"   # U+2984
@@ -304,7 +309,7 @@ def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
         print(f"[{_ts()}] compute_metrics: decoding done. Starting full-line CER ...")
         # Sample to avoid jiwer hanging on large val sets
         try:
-            full_line_cer_result = cer_metric.compute(
+            full_line_cer_result = get_cer_metric().compute(
                 predictions=decoded_preds[:cap_eval],
                 references=decoded_labels[:cap_eval],
             )
