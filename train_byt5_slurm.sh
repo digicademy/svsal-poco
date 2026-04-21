@@ -72,6 +72,7 @@ export TRANSFORMERS_OFFLINE=1
 export HF_HOME=$PTMP_BASE/cache/huggingface
 export HF_DATASETS_CACHE=$PTMP_BASE/cache/huggingface/datasets
 export HUGGINGFACE_HUB_CACHE=$PTMP_BASE/cache/huggingface/hub
+export HF_MODULES_CACHE=$PTMP_BASE/cache/huggingface/modules
 
 # W&B in offline mode
 export WANDB_MODE=offline
