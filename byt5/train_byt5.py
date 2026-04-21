@@ -97,6 +97,7 @@ def parse_args():
     p.add_argument("--oversample_abbr",   type=float, default=2.0)
     p.add_argument("--lang_prefix",       action="store_true")
     p.add_argument("--marker_dropout",    type=float, default=0.5, help="Randomly drop markers in source with this probability (to teach marker-free detection)")
+    p.add_argument("--context_lines",     type=int,   default=1, help="Lines of context to include on each side of the marked line during example construction")
     p.add_argument("--seed",              type=int,   default=42)
     p.add_argument("--hf_token",          default=os.environ.get("HF_TOKEN"))
     p.add_argument("--wandb_key",         default=os.environ.get("WANDB_API_KEY"))
@@ -426,6 +427,7 @@ def main():
         lang_prefix=args.lang_prefix,
         seed=args.seed,
         marker_dropout=args.marker_dropout,
+        context_lines=args.context_lines,
     )
     print(f"Built {len(examples)} examples")
     print("Splitting dataset...")

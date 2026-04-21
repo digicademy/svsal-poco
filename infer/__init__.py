@@ -1,4 +1,4 @@
-# infer.py
+# infer/__init__.py
 #
 # Inference pipeline: chains the boundary classifier and ByT5 expansion model.
 #
@@ -6,9 +6,10 @@
 # this script:
 #   1. Sorts lines into document order
 #   2. Runs the boundary classifier to identify nonbreaking line pairs
-#   3. Concatenates identified pairs with ↵
+#   3. Builds sliding windows of lines (matching training format)
 #   4. Runs ByT5 to expand abbreviations
-#   5. Splits output on ↵ to restore line structure
+#   5. Splits output on ↵ to restore line structure, keeping only
+#      "owned" lines from each window
 #   6. Writes a JSONL output file with expanded text per line
 
 import json
@@ -23,15 +24,139 @@ from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_
 
 
 # ---------------------------------------------------------------------------
+# Sliding window construction
+# ---------------------------------------------------------------------------
+
+def build_nonbreaking_chains(
+    lines: list[dict],
+) -> list[list[int]]:
+    """
+    Group line indices into nonbreaking chains based on boundary
+    predictions. Each chain is a list of consecutive line indices
+    that must be concatenated (joined with LINE_SEP) because words
+    continue across the line breaks.
+
+    A standalone line is a chain of length 1.
+    """
+    index = {row["id"]: i for i, row in enumerate(lines)}
+    consumed: set[int] = set()
+    chains: list[list[int]] = []
+
+    for i, row in enumerate(lines):
+        if i in consumed:
+            continue
+
+        chain = [i]
+        consumed.add(i)
+        current = row
+
+        while True:
+            next_id = current.get("predicted_nonbreaking_next_line", "")
+            next_idx = index.get(next_id) if next_id else None
+            if next_idx is not None and next_idx not in consumed:
+                chain.append(next_idx)
+                consumed.add(next_idx)
+                current = lines[next_idx]
+            else:
+                break
+
+        chains.append(chain)
+
+    return chains
+
+
+def build_sliding_windows(
+    lines:          list[dict],
+    chains:         list[list[int]],
+    context_lines:  int = 2,
+    max_bytes:      int = 480,
+) -> list[dict]:
+    """
+    Build sliding windows for ByT5 inference, mirroring the training
+    format from build_byt5_examples.
+
+    Each window contains:
+    - A central chain (the "owned" lines whose output we keep)
+    - Up to context_lines lines before and after for context
+
+    The window is bounded by max_bytes to avoid exceeding the model's
+    input length. Context is trimmed (not owned lines) if the window
+    would be too long.
+
+    Returns a list of window dicts:
+        {
+            "line_indices":  [int, ...],   # all line indices in window
+            "owned_start":   int,          # offset into line_indices
+            "owned_end":     int,          # offset into line_indices
+        }
+    """
+    windows = []
+
+    for chain in chains:
+        chain_start = chain[0]
+        chain_end = chain[-1]
+
+        # Find valid context range (don't cross document boundaries)
+        doc_id = lines[chain_start]["doc_id"]
+
+        # Context before: walk backwards, same document
+        ctx_before = []
+        idx = chain_start - 1
+        while idx >= 0 and len(ctx_before) < context_lines:
+            if lines[idx]["doc_id"] != doc_id:
+                break
+            ctx_before.insert(0, idx)
+            idx -= 1
+
+        # Context after: walk forwards, same document
+        ctx_after = []
+        idx = chain_end + 1
+        while idx < len(lines) and len(ctx_after) < context_lines:
+            if lines[idx]["doc_id"] != doc_id:
+                break
+            ctx_after.append(idx)
+            idx += 1
+
+        # Check byte budget — trim context if needed
+        all_indices = ctx_before + chain + ctx_after
+        while _window_byte_len(lines, all_indices) > max_bytes and ctx_after:
+            ctx_after.pop()
+            all_indices = ctx_before + chain + ctx_after
+        while _window_byte_len(lines, all_indices) > max_bytes and ctx_before:
+            ctx_before.pop(0)
+            all_indices = ctx_before + chain + ctx_after
+
+        owned_start = len(ctx_before)
+        owned_end = owned_start + len(chain)
+
+        windows.append({
+            "line_indices": all_indices,
+            "owned_start":  owned_start,
+            "owned_end":    owned_end,
+        })
+
+    return windows
+
+
+def _window_byte_len(lines: list[dict], indices: list[int]) -> int:
+    """Estimate byte length of a window when lines are joined with LINE_SEP."""
+    if not indices:
+        return 0
+    total = sum(len(lines[i]["source_sic"].encode("utf-8")) for i in indices)
+    total += len(indices) - 1  # LINE_SEP characters
+    return total
+
+
+# ---------------------------------------------------------------------------
 # ByT5 batched inference
 # ---------------------------------------------------------------------------
 
 def expand_abbreviations(
-    examples:          list[dict],   # list of {source, line_ids} dicts
+    examples:          list[dict],   # list of {source, line_ids, ...} dicts
     model:             T5ForConditionalGeneration,
     tokenizer:         AutoTokenizer,
     max_input_length:  int = 512,
-    max_target_length: int = 512,
+    max_target_length: int = 384,
     batch_size:        int = 32,
     device:            torch.device = None,
 ) -> list[str]:
@@ -44,8 +169,8 @@ def expand_abbreviations(
     model = model.to(device)
     model.eval()
 
-    sources  = [e["source"] for e in examples]
-    outputs  = []
+    sources = [e["source"] for e in examples]
+    outputs = []
 
     for i in range(0, len(sources), batch_size):
         batch_sources = sources[i:i + batch_size]
@@ -77,18 +202,19 @@ def expand_abbreviations(
 def run_pipeline(
     input_path:          str,
     output_path:         str,
-    boundary_model_dir:  str | None = None,
-    byt5_model_dir:      str | None = None,
-    lexicon_data_path:   str | None = None,
-    boundary_threshold:  float | None = None,   # None = load from threshold.json
+    boundary_model_dir:  str   | None = None,
+    byt5_model_dir:      str   | None = None,
+    lexicon_data_path:   str   | None = None,
+    boundary_threshold:  float | None = None,
     batch_size:          int   = 32,
     lang_prefix:         bool  = False,
     context_chars:       int   = 40,
+    context_lines:       int   = 2,
     # Pre-loaded objects — skip loading when provided
-    boundary_model:      BoundaryClassifier | None = None,
-    boundary_tokenizer:  CanineTokenizer | None = None,
+    boundary_model:      BoundaryClassifier         | None = None,
+    boundary_tokenizer:  CanineTokenizer            | None = None,
     byt5_model:          T5ForConditionalGeneration | None = None,
-    byt5_tokenizer:      AutoTokenizer | None = None,
+    byt5_tokenizer:      AutoTokenizer              | None = None,
 ):
     """
     Full inference pipeline for unseen texts.
@@ -99,6 +225,7 @@ def run_pipeline(
     boundary_model_dir: directory containing best_model.pt and threshold.json
     byt5_model_dir:     HF model directory or Hub repo id for ByT5
     lexicon_data_path:  optional path to training JSONL for lexicon construction
+    context_lines:      number of context lines on each side of owned lines
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -108,15 +235,15 @@ def run_pipeline(
             raise ValueError("Provide boundary_model or boundary_model_dir")
         print("Loading boundary classifier...")
         boundary_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
-        boundary_model   = BoundaryClassifier(
+        boundary_model = BoundaryClassifier(
             use_lexicon=(lexicon_data_path is not None),
         )
         boundary_model.load_state_dict(
             torch.load(f"{boundary_model_dir}/best_model.pt",
                         map_location=device)
         )
+        print(f"Boundary model loaded from {boundary_model_dir}")
 
-    # Load threshold selected during training
     if boundary_threshold is None:
         if boundary_model_dir:
             threshold_path = Path(boundary_model_dir) / "threshold.json"
@@ -127,6 +254,7 @@ def run_pipeline(
         if boundary_threshold is None:
             boundary_threshold = 0.6
             print(f"No threshold found; using default {boundary_threshold}")
+    print(f"Boundary threshold: {boundary_threshold}")
 
     # Optional lexicon
     lexicon = None
@@ -141,6 +269,7 @@ def run_pipeline(
         print("Loading ByT5...")
         byt5_tokenizer = AutoTokenizer.from_pretrained(byt5_model_dir)
         byt5_model = T5ForConditionalGeneration.from_pretrained(byt5_model_dir)
+        print(f"ByT5 model loaded from {byt5_model_dir}")
 
     # --- Load and sort input lines ---
     print("Loading input lines...")
@@ -157,34 +286,33 @@ def run_pipeline(
         context_chars=context_chars,
     )
 
-    # --- Stage 2: build ByT5 input examples (concatenate pairs) ---
-    print("Building ByT5 input examples...")
-    index    = {row["id"]: row for row in lines_with_boundaries}
-    consumed = set()
-    byt5_examples = []   # each entry: {source, line_ids}
+    # --- Stage 2: build sliding windows ---
+    print("Building nonbreaking chains...")
+    chains = build_nonbreaking_chains(lines_with_boundaries)
+    print(f"  {len(chains)} chains from {len(lines_with_boundaries)} lines "
+          f"(longest chain: {max(len(c) for c in chains)} lines)")
 
-    for row in lines_with_boundaries:
-        if row["id"] in consumed:
-            continue
+    print(f"Building sliding windows (context_lines={context_lines})...")
+    windows = build_sliding_windows(
+        lines_with_boundaries, chains,
+        context_lines=context_lines,
+    )
+    print(f"  {len(windows)} windows")
 
-        next_id  = row.get("predicted_nonbreaking_next_line", "")
-        next_row = index.get(next_id) if next_id else None
-
-        if next_row:
-            source   = row["source_sic"] + LINE_SEP + next_row["source_sic"]
-            line_ids = [row["id"], next_row["id"]]
-            consumed.add(next_row["id"])
-        else:
-            source   = row["source_sic"]
-            line_ids = [row["id"]]
-
-        if lang_prefix:
-            source = "[LA] " + source
-
-        byt5_examples.append({"source": source, "line_ids": line_ids})
+    # Build ByT5 examples from windows
+    byt5_examples = []
+    for window in windows:
+        indices = window["line_indices"]
+        source = LINE_SEP.join(
+            lines_with_boundaries[i]["source_sic"] for i in indices
+        )
+        byt5_examples.append({
+            "source":   source,
+            "window":   window,
+        })
 
     # --- Stage 3: ByT5 expansion ---
-    print(f"Running ByT5 on {len(byt5_examples)} examples...")
+    print(f"Running ByT5 on {len(byt5_examples)} windows...")
     expanded_outputs = expand_abbreviations(
         examples=byt5_examples,
         model=byt5_model,
@@ -194,19 +322,43 @@ def run_pipeline(
     )
 
     # --- Stage 4: restore line structure ---
-    # Split on LINE_SEP to recover per-line expanded text
+    # Split each output on LINE_SEP, keep only owned lines
     output_by_line_id = {}
+
     for example, output in zip(byt5_examples, expanded_outputs):
+        window = example["window"]
+        indices = window["line_indices"]
+        owned_start = window["owned_start"]
+        owned_end = window["owned_end"]
+
         parts = output.split(LINE_SEP)
-        for line_id, part in zip(example["line_ids"], parts):
-            output_by_line_id[line_id] = part
+
+        # The model should produce one part per input line.
+        # If the count doesn't match (model hallucinated or dropped a
+        # separator), fall back to using the original text for owned lines.
+        if len(parts) != len(indices):
+            print(f"  Warning: window expected {len(indices)} parts, "
+                  f"got {len(parts)}. Using original text for owned lines.")
+            for idx in indices[owned_start:owned_end]:
+                line_id = lines_with_boundaries[idx]["id"]
+                if line_id not in output_by_line_id:
+                    output_by_line_id[line_id] = lines_with_boundaries[idx]["source_sic"]
+            continue
+
+        # Keep only owned lines
+        for offset in range(owned_start, owned_end):
+            line_idx = indices[offset]
+            line_id = lines_with_boundaries[line_idx]["id"]
+            output_by_line_id[line_id] = parts[offset]
 
     # --- Stage 5: write output ---
     print(f"Writing output to {output_path}...")
     with open(output_path, "w") as f:
         for row in lines:
             out_row = dict(row)
-            out_row["expanded_text"] = output_by_line_id.get(row["id"], row["source_sic"])
+            out_row["expanded_text"] = output_by_line_id.get(
+                row["id"], row["source_sic"]
+            )
             f.write(json.dumps(out_row, ensure_ascii=False) + "\n")
 
     print("Done.")
@@ -225,6 +377,7 @@ def parse_args():
     p.add_argument("--lexicon_data",       default=None)
     p.add_argument("--threshold",          type=float, default=None)
     p.add_argument("--batch_size",         type=int,   default=32)
+    p.add_argument("--context_lines",      type=int,   default=2)
     return p.parse_args()
 
 
@@ -238,4 +391,5 @@ if __name__ == "__main__":
         lexicon_data_path=args.lexicon_data,
         boundary_threshold=args.threshold,
         batch_size=args.batch_size,
+        context_lines=args.context_lines,
     )

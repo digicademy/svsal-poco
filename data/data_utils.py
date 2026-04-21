@@ -111,10 +111,11 @@ def document_split(
 
 def build_byt5_examples(
     lines:           list[dict],
-    oversample_abbr: float = 2.0,
-    lang_prefix:     bool  = False,
+    oversample_abbr: float = 2.0,   # rate of oversampling abbreviation-containing examples
+    lang_prefix:     bool  = False, # whether to prepend language token to source
     seed:            int   = 42,
-    marker_dropout: float = 0.5,
+    marker_dropout:  float = 0.5,   # rate of randomly stripping ABBR_OPEN/ABBR_CLOSE from source
+    context_lines:   int   = 2,     # lines of context on each side
 ) -> list[dict]:
     """
     Construct (source, target) training pairs for ByT5.
@@ -128,51 +129,73 @@ def build_byt5_examples(
     ABBR_OPEN / ABBR_CLOSE delimiters (inserted during TEI export).
     Target lines (target_corr) are used as-is, without delimiters.
     """
+    rng = random.Random(seed)
     index    = {row["id"]: row for row in lines}
     consumed = set()
     examples = []
 
+    # Group lines by document — windows don't cross document boundaries
+    by_doc: dict[str, list[dict]] = defaultdict(list)
     for row in lines:
-        if row["id"] in consumed:
-            continue
+        by_doc[row["doc_id"]].append(row)
 
-        next_id  = row.get("nonbreaking_next_line", "")
-        next_row = index.get(next_id) if next_id else None
+    examples = []
 
-        if next_row:
-            source   = row["source_sic"] + LINE_SEP + next_row["source_sic"]
-            target   = row["target_corr"] + LINE_SEP + next_row["target_corr"]
-            has_abbr = (row["contains_abbr"] == "true"
-                        or next_row["contains_abbr"] == "true")
-            lang     = row["lang"]
-            consumed.add(next_row["id"])
-        else:
-            source   = row["source_sic"]
-            target   = row["target_corr"]
-            has_abbr = row["contains_abbr"] == "true"
-            lang     = row["lang"]
+    for doc_id, doc_lines in by_doc.items():
+        # Build nonbreaking chains within this document
+        consumed = set()
 
-        # Randomly strip markers to teach marker-free detection
-        if has_abbr and marker_dropout > 0 and random.random() < marker_dropout:
-            source = source.replace(ABBR_OPEN, "").replace(ABBR_CLOSE, "")
+        for i, row in enumerate(doc_lines):
+            if row["id"] in consumed:
+                continue
 
-        if lang_prefix:
-            lang_tag = LANG_TOKENS.get(
-                lang[0] if lang else "la", LANG_TOKENS["default"]
-            )
-            source = lang_tag + " " + source
+            # Build the chain starting at this line
+            chain = [row]
+            consumed.add(row["id"])
+            current = row
+            while True:
+                next_id = current.get("nonbreaking_next_line", "")
+                next_row = index.get(next_id) if next_id else None
+                if next_row and next_row["id"] not in consumed:
+                    chain.append(next_row)
+                    consumed.add(next_row["id"])
+                    current = next_row
+                else:
+                    break
 
-        examples.append({
-            "source":   source,
-            "target":   target,
-            "has_abbr": has_abbr,
-            "doc_id":   row["doc_id"],
-            "lang":     lang[0] if lang else "la",
-        })
+            # Find position of chain start/end in doc_lines
+            chain_start = doc_lines.index(chain[0])
+            chain_end = chain_start + len(chain)
+
+            # Add context lines (don't cross document boundary)
+            ctx_start = max(0, chain_start - context_lines)
+            ctx_end = min(len(doc_lines), chain_end + context_lines)
+
+            window = doc_lines[ctx_start:ctx_end]
+
+            source = LINE_SEP.join(r["source_sic"] for r in window)
+            target = LINE_SEP.join(r["target_corr"] for r in window)
+            has_abbr = any(r["contains_abbr"] == "true" for r in window)
+            lang = row["lang"]
+
+            # Random marker dropout to teach marker-free detection
+            if marker_dropout > 0 and has_abbr and rng.random() < marker_dropout:
+                source = source.replace(ABBR_OPEN, "").replace(ABBR_CLOSE, "")
+
+            if lang_prefix:
+                lang_token = LANG_TOKENS.get(lang[0], LANG_TOKENS["default"])
+                source = f"{lang_token} {source}"
+
+            examples.append({
+                "source":   source,
+                "target":   target,
+                "has_abbr": has_abbr,
+                "doc_id":   doc_id,
+                "lang":     lang[0] if lang else "la",
+            })
 
     # Oversample abbreviation-containing examples
     if oversample_abbr > 1.0:
-        rng     = random.Random(seed)
         abbr_ex = [e for e in examples if e["has_abbr"]]
         n_extra = int(len(abbr_ex) * (oversample_abbr - 1.0))
         examples += rng.choices(abbr_ex, k=n_extra)
