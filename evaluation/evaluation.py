@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from collections import defaultdict, Counter
 from datetime import datetime
 
-cer_metric = hf_evaluate.load("cer")
+_cer_metric = None
+def get_cer_metric():
+    global _cer_metric
+    if _cer_metric is None:
+        _cer_metric = hf_evaluate.load("cer")
+    return _cer_metric
 
 ABBR_OPEN  = "⦃"
 ABBR_CLOSE = "⦄"
@@ -143,7 +148,7 @@ def _map_spans(
 # ---------------------------------------------------------------------------
 
 def extract_cer(result) -> float:
-    """Extract CER float from cer_metric.compute() result regardless of return type."""
+    """Extract CER float from get_cer_metric().compute() result regardless of return type."""
     if result is None:
         return 0.0
     elif isinstance(result, float):
@@ -246,7 +251,7 @@ def compute_span_cer(
           f"starting span CER over {n_spans} spans ...")
     try:
         span_cer = extract_cer(
-            cer_metric.compute(predictions=pred_all, references=gold_all)
+            get_cer_metric().compute(predictions=pred_all, references=gold_all)
         )
     except ZeroDivisionError:
         span_cer = 0.0
@@ -255,12 +260,12 @@ def compute_span_cer(
           f"Starting full-line CER over {len(model_outputs)} lines...")
     try:
         full_line_cer = extract_cer(
-            cer_metric.compute(predictions=model_outputs, references=target_corrs)
+            get_cer_metric().compute(predictions=model_outputs, references=target_corrs)
         )
     except ZeroDivisionError:
         full_line_cer = 0.0
 
-    print(f"cer_metric.compute() done. Span CER: {span_cer:.4f}, "
+    print(f"get_cer_metric().compute() done. Span CER: {span_cer:.4f}, "
           f"Full Line CER: {full_line_cer:.4f}, "
           f"Exact Match: {n_exact}/{n_spans} ({n_exact/n_spans:.2%})")
 
@@ -302,7 +307,7 @@ def build_type_breakdown(results: list[SpanResult]) -> dict:
 
         try:
             type_cer: float = extract_cer(
-                cer_metric.compute(predictions=preds, references=golds)
+                get_cer_metric().compute(predictions=preds, references=golds)
             )
         except ZeroDivisionError:
             type_cer = 0.0
