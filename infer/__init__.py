@@ -13,13 +13,14 @@
 #   6. Writes a JSONL output file with expanded text per line
 
 import json
+import re
 import argparse
 import torch
 from pathlib import Path
 from collections import defaultdict
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 
-from data.data_utils import load_and_sort_lines, CorpusLexicon, ABBR_OPEN, ABBR_CLOSE, LINE_SEP, LINE_BREAK
+from data.data_utils import load_and_sort_lines, CorpusLexicon, ABBR_OPEN, ABBR_CLOSE, LINE_BREAK, LINE_SEP
 from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_boundaries
 
 
@@ -334,13 +335,13 @@ def run_pipeline(
     # Split each output on LINE_SEP, keep only owned lines
     output_by_line_id = {}
 
+    LINE_SPLIT_PATTERN = re.compile(f"[{re.escape(LINE_SEP)}{re.escape(LINE_BREAK)}]")
     for example, output in zip(byt5_examples, expanded_outputs):
         window = example["window"]
         indices = window["line_indices"]
         owned_start = window["owned_start"]
         owned_end = window["owned_end"]
-
-        parts = output.split(LINE_SEP)
+        parts = LINE_SPLIT_PATTERN.split(output)
 
         # The model should produce one part per input line.
         # If the count doesn't match (model hallucinated or dropped a

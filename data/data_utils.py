@@ -15,9 +15,8 @@ from typing import Optional
 
 ABBR_OPEN  = "⦃"   # U+2983 — wraps abbreviated span in source_sic
 ABBR_CLOSE = "⦄"   # U+2984
-# LINE_SEP   = "↵"   # U+21B5 — marks concatenated nonbreaking line boundary
-LINE_BREAK = "¬"   # U+00AC — nonbreaking: word continues across this boundary
-LINE_SEP   = "↵"   # U+21B5 — breaking: normal line boundary, no word continuation
+LINE_SEP   = "¬"   # U+00AC — nonbreaking: word continues across this boundary
+LINE_BREAK = "↵"   # U+21B5 — breaking: normal line boundary, no word continuation
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +120,7 @@ def build_byt5_examples(
     """
     Construct (source, target) training pairs for ByT5.
 
-    - Concatenates nonbreaking line pairs with LINE_SEP
+    - Concatenates nonbreaking line pairs with LINE_SEP, and breaking ones with LINE_BREAK
     - Oversamples lines containing abbreviations by oversample_abbr factor
     - Optionally prepends a language token ([LA] or [ES]) to the source
     - Retains doc_id and lang for splitting and stratified evaluation
