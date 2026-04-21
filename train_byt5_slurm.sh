@@ -109,7 +109,7 @@ pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
 pip install -r requirements.txt
 
 # Install from the local clone:
-pip install -e --no-deps $PTMP_BASE/svsal-poco
+pip install -e $PTMP_BASE/svsal-poco
 
 # ============================================================
 # Training
