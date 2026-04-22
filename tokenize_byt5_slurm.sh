@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #SBATCH --mail-type=none
 #SBATCH --mail-user=wagner@lhlt.mpg.de
 #SBATCH --output=tokenize_%j.out
@@ -41,17 +41,16 @@ export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 # Clean up stale lock files from previous killed jobs
-find $PTMP_BASE/cache -name "*.lock" -delete 2>/dev/null
+# find $PTMP_BASE/cache -name "*.lock" -delete 2>/dev/null
 
 # ============================================================
 # Load modules
 # ============================================================
 
 module purge
-module load gcc/14 rocm/7.2 openmpi/5.0 python-waterboa/2025.06
+module load gcc/14 openmpi/5.0 python-waterboa/2025.06
 
-
-pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
+pip install torch
 pip install -r requirements.txt
 # pip install --no-deps -e $PTMP_BASE/svsal-poco
 
@@ -69,5 +68,4 @@ python byt5/train_byt5.py \
     --tokenizer_num_proc 32 \
     --train_batch_size 32 \
     --use_cache
-
 
