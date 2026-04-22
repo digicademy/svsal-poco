@@ -9,19 +9,17 @@
 #
 #SBATCH --mail-type=none
 #SBATCH --mail-user=wagner@lhlt.mpg.de
-# #SBATCH --output=/ptmp/%u/byt5-salamanca/logs/train_%j.out
 #SBATCH --output=train_%j.out
 #SBATCH --error=train_%j.err
 #SBATCH --job-name=byt5-train-salamanca
-#SBATCH -D .                   # Initial working directory
-
-# --- Change the following for testing the workflow/GPU setup ---
-#SBATCH --time=00:12:00         # apudev has walltime of 15 min, apu of 24h
-# #SBATCH --partition=apu         # check actual partition name
-#SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
-
+#SBATCH -D .                    # Initial working directory
 #SBATCH --constraint="apu"
 #SBATCH --nodes=1
+
+# --- Change the following for testing the workflow/GPU setup ---
+#SBATCH --time=23:30:00         # apudev has walltime of 15 min, apu of 24h
+#SBATCH --partition=apu         # check actual partition name
+# #SBATCH --partition=apudev      # Viper apudev: for testing, 1 node with 2 MI300, 15 min. walltime
 
 # --- VIPER default case: use a single APU on a shared node ---
 # #SBATCH --gres=gpu:1            # One node
