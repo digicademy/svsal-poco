@@ -145,7 +145,6 @@ srun python byt5/train_byt5.py \
     --save_total_limit 3 \
     --epochs 10 \
     --learning_rate 1e-4 \
-    --attn_implementation "sdpa" \
     --tokenizer_num_proc 16 \
     --bf16 \
     --oversample_abbr 2.0 \
