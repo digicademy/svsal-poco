@@ -143,33 +143,32 @@ def build_byt5_examples(
 
     for doc_id, doc_lines in by_doc.items():
         # Build nonbreaking chains within this document
+        pos_of = {row["id"]: i for i, row in enumerate(doc_lines)}
         consumed = set()
 
         for i, row in enumerate(doc_lines):
             if row["id"] in consumed:
                 continue
 
-            # Build the chain starting at this line
-            chain = [row]
+            # Build chain
+            chain_indices = [i]
             consumed.add(row["id"])
             current = row
             while True:
                 next_id = current.get("nonbreaking_next_line", "")
-                next_row = index.get(next_id) if next_id else None
-                if next_row and next_row["id"] not in consumed:
-                    chain.append(next_row)
-                    consumed.add(next_row["id"])
-                    current = next_row
-                else:
+                if not next_id or next_id not in pos_of or next_id in consumed:
                     break
+                ni = pos_of[next_id]
+                chain_indices.append(ni)
+                consumed.add(next_id)
+                current = doc_lines[ni]
 
-            # Find position of chain start/end in doc_lines
-            chain_start = doc_lines.index(chain[0])
-            chain_end = chain_start + len(chain)
-
+            # Context window — direct index arithmetic, no .index() call
+            chain_start = chain_indices[0]
+            chain_end = chain_indices[-1]
             # Add context lines (don't cross document boundary)
             ctx_start = max(0, chain_start - context_lines)
-            ctx_end = min(len(doc_lines), chain_end + context_lines)
+            ctx_end = min(len(doc_lines), chain_end + 1 + context_lines)
 
             window = doc_lines[ctx_start:ctx_end]
 
