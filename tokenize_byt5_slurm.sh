@@ -5,12 +5,11 @@
 #SBATCH --error=tokenize_%j.err
 #SBATCH --job-name=byt5-tokenize
 #SBATCH -D .                    # Initial working directory
-#SBATCH --partition=medium      # CPU (!) partition
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --nodes=1               # request 1 node
+#SBATCH --ntasks-per-node=1     # only start 1 task via srun because Python multiprocessing starts more tasks internally
+#SBATCH --cpus-per-task=128     # assign all the cores to that first task to make room for multithreading
 #SBATCH --mem=64000
-#SBATCH --time=00:15:00
+#SBATCH --time=12:00:00
 
 # ============================================================
 # Environment setup
@@ -36,6 +35,9 @@ export HF_DATASETS_CACHE=$PTMP_BASE/cache/huggingface/datasets
 export HUGGINGFACE_HUB_CACHE=$PTMP_BASE/cache/huggingface/hub
 export HF_MODULES_CACHE=$PTMP_BASE/cache/huggingface/modules
 
+# Important:
+# Set the number of OMP threads *per process* to avoid overloading of the node!
+export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 # Clean up stale lock files from previous killed jobs
