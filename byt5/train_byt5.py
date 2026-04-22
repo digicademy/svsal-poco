@@ -396,7 +396,7 @@ class CarbonTrackerCallback(TrainerCallback):
 # ---------------------------------------------------------------------------
 
 def main():
-    print("Starting ByT5 training")
+    print("Starting ByT5 training", flush=True)
     args = parse_args()
     random.seed(args.seed)
     use_hub = args.output_repo is not None
