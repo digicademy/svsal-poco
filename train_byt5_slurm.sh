@@ -24,16 +24,16 @@
 #SBATCH --nodes=1
 
 # --- VIPER default case: use a single APU on a shared node ---
-#SBATCH --gres=gpu:1            # One node
-#SBATCH --ntasks=1              # One task
-#SBATCH --cpus-per-task=16      # 1/8 of available CPUs
-#SBATCH --mem=110000            # of 128000
+# #SBATCH --gres=gpu:1            # One node
+# #SBATCH --ntasks=1              # One task
+# #SBATCH --cpus-per-task=16      # 1/8 of available CPUs
+# #SBATCH --mem=110000            # of 128000
 
 # --- VIPER alternative case: two APUs on a shared node ---
-# #SBATCH --gres=gpu:2            # Two GPUs
-# #SBATCH --ntasks=1
-# #SBATCH --cpus-per-task=32
-# #SBATCH --mem=220000
+#SBATCH --gres=gpu:2            # Two GPUs
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=220000
 
 # --- DAIS: H200 on a shared node would be ---
 # #SBATCH --partition="gpu1"    # request a shared node.
@@ -153,11 +153,11 @@ srun python byt5/train_byt5.py \
     --oversample_abbr 2.0 \
     --marker_dropout 0.5 \
     --context_lines 1 \
-    --train_batch_size 64 \
+    --train_batch_size 32 \
     --gradient_accumulation_steps 2 \
-    --eval_batch_size 128 \
-    --max_input_length 256 \
-    --max_target_length 192
+    --eval_batch_size 64 \
+    --max_input_length 512 \
+    --max_target_length 384 \
 
 # 2-GPU settings:
 #    --train_batch_size 32 \
