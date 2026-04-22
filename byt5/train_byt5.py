@@ -608,6 +608,11 @@ def main():
         print(f"Tokenized dataset: {tokenized}")
         tokenized_test = tokenized["test"]
 
+    # With epochs=0, we do example creation and tokenization only (with caching if enabled)
+    if args.epochs == 0:
+        print("Epochs=0: tokenization complete, exiting.")
+        return
+
     # --- Training ---
     if not args.eval_only:
 
