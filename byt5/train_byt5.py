@@ -26,11 +26,7 @@ import sys
 print("Starting imports...", flush=True)
 
 import os
-print("os ok", flush=True)
-
 import json
-print("json ok", flush=True)
-
 import random
 import argparse
 from pathlib import Path
@@ -821,7 +817,5 @@ def main():
         print(f"Results saved locally to {output_dir}/")
 
 
-print("About to call main()", flush=True)
 if __name__ == "__main__":
-    print("__name__ check passed", flush=True)
     main()
