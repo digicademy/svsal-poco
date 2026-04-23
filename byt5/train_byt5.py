@@ -672,7 +672,7 @@ def main():
 
             seed=args.seed,
             logging_steps=100,
-            report_to="all",  # log to both console and WandB (if initialized)
+            report_to=["wandb", "tensorboard"],  # exclude codecarbon — incompatible with ROCm
 
             # Hub integration only when use_hub is True
             push_to_hub=use_hub,
@@ -700,7 +700,7 @@ def main():
             compute_metrics=compute_metrics,
             callbacks=[
                 EarlyStoppingCallback(early_stopping_patience=3),
-                CarbonTrackerCallback(str(output_dir)),
+                # CarbonTrackerCallback(str(output_dir)),
             ],
         )
         print(f"Trainer is using DDP: {trainer.args.distributed_state is not None}")
