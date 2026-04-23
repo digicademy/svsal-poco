@@ -125,7 +125,7 @@ def parse_args():
     p.add_argument("--wandb_entity",      default=os.environ.get("WANDB_ENTITY", None))
     p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
     p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
-    p.add_argument("--attn_implementation", default="sdpa", help="Attention backend: 'sdpa' (default), 'flash_attention_2', or None")
+    p.add_argument("--attn_implementation", default=None, help="Attention backend: 'eager' (default), 'flash_attention_2', or None")
     p.add_argument("--gradient_checkpointing", action="store_true")
 
     # HPC: save_total_limit for checkpoint disk management
@@ -437,37 +437,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Load data ---
-    print("Loading lines...")
-    lines = load_and_sort_lines(data_path)
-    print(f"Loaded {len(lines)} lines from {data_path}")
-    print("Building examples...")
-    # import data.data_utils as du
-    # print(f"    data_utils loaded from: {du.__file__}")
-    examples = build_byt5_examples(
-        lines,
-        oversample_abbr=args.oversample_abbr,
-        lang_prefix=args.lang_prefix,
-        seed=args.seed,
-        marker_dropout=args.marker_dropout,
-        context_lines=args.context_lines,
-    )
-    print(f"Built {len(examples)} examples")
-    print("Splitting dataset...")
-    train_ex, val_ex, test_ex = document_split(examples, seed=args.seed)
-    print(f"Train: {len(train_ex)} | Val: {len(val_ex)} | Test: {len(test_ex)}")
-
-    if not train_ex:
-        print("Warning: empty train set, using full dataset for training")
-        train_ex = examples
-    if not val_ex:
-        print("Warning: empty val set, using full dataset for validation")
-        val_ex = examples
-    if not test_ex:
-        print("Warning: empty test set, using full dataset for evaluation")
-        test_ex = examples
-
-    # --- Load model, tokenizer and collator ---
+    # --- Define model_id and load model ---
     # If eval_only is set, we want to load the best model from local disk
     # or from the Hub (if available)
     # otherwise we'll train from scratch and load the base model - 
@@ -482,30 +452,16 @@ def main():
     else:
         model_id = args.model_name
 
-    print(f"Loading tokenizer from {model_id} ...")
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-
     print(f"Loading model from {model_id} ...")
     kwargs = dict(tie_word_embeddings=False)
     if args.attn_implementation:
-        # Use SDPA (flash-like attention) — this is likely already the default but being explicit ensures it
         kwargs["attn_implementation"] = args.attn_implementation
     model = T5ForConditionalGeneration.from_pretrained(model_id, **kwargs)
     print(f"Model loaded from: {model_id}")
 
-    print("Initializing data collator...")
-    collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model,
-        label_pad_token_id=-100,
-        pad_to_multiple_of=8,
-    )
-
-    print(f"Number of GPUs: {torch.cuda.device_count()}")
-    print(f"Model device: {model.device}")
-    print(f"Local rank: {os.environ.get('LOCAL_RANK', 'N/A')}")
-    print(f"World size: {os.environ.get('WORLD_SIZE', 'N/A')}")
-    print(f"Is distributed: {torch.distributed.is_initialized() if torch.distributed.is_available() else False}")
+    print(f"Loading tokenizer from {model_id} ...")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    print(f"Tokenizer loaded from: {model_id}")
 
     # Optional: torch.compile for fused operations across ByT5's deep encoder
     if not args.eval_only and torch.__version__ >= "2.0":
@@ -516,7 +472,9 @@ def main():
         except Exception as e:
             print(f"torch.compile failed ({e}), continuing without compilation")
 
-    # --- Tokenize (with caching) ---
+    # --- Data loading and tokenization ---
+    cache_path = output_dir / "tokenized_cache"
+    sources_path = output_dir / "sources_cache.json"
 
     tokenize_fn = make_tokenize_fn(
         tokenizer, args.max_input_length, args.max_target_length,
@@ -538,59 +496,93 @@ def main():
             remove_columns=["source", "target"],
         )
 
-    # In eval-only mode, we only need the test split — no caching, no training data
-    if args.eval_only:
-        print("Eval-only mode: tokenizing just the test split...")
-        tokenized_test = tokenize_examples(test_ex, strip_markers=True)
+    # --- Fast path: load from cache, skip example building entirely ---
+    tokenized = None
 
-    else:
-        cache_path = output_dir / "tokenized_cache"
-        cache_valid = False
+    if not args.eval_only and args.use_cache and cache_path.exists() and sources_path.exists():
+        print("Attempting to load tokenized dataset from cache...")
+        try:
+            tokenized = DatasetDict.load_from_disk(str(cache_path))
 
-        if args.use_cache:
-            # Try to download cache from Hub if not present locally
-            if not cache_path.exists() and use_hub:
-                try:
-                    print("Downloading tokenized cache from Hub...")
-                    snapshot_download(
-                        repo_id=args.output_repo,
-                        local_dir=str(output_dir),
-                        allow_patterns="tokenized_cache/**",
-                        repo_type="model",
-                    )
-                    if cache_path.exists():
-                        print("Cache downloaded successfully.")
-                    else:
-                        print("No cached tokenization found on Hub, will tokenize from scratch.")
-                except Exception as e:
-                    print(f"Cache download failed ({e}), will tokenize from scratch.")
+            # Validate structure
+            required_splits = {"train", "val", "test"}
+            if set(tokenized.keys()) != required_splits:
+                raise ValueError(
+                    f"Cache has splits {set(tokenized.keys())}, "
+                    f"expected {required_splits}"
+                )
+            for split in required_splits:
+                if "input_ids" not in tokenized[split].column_names:
+                    raise ValueError(f"Split '{split}' missing input_ids column")
 
-            # Check if cache is (now) available locally, validate it, and load if valid
-            if cache_path.exists():
-                print("Loading tokenized dataset from cache...")
-                tokenized = DatasetDict.load_from_disk(str(cache_path))
-                expected = {
-                    "train": len(train_ex),
-                    "val": len(val_ex),
-                    "test": len(test_ex),
-                }
-                actual = { split: len(tokenized[split]) for split in tokenized }
-                if actual == expected:
-                    print(f"Cache valid with splits: {actual}")
-                    cache_valid = True
-                else:
-                    print(f"Cache invalid: expected {expected}, got {actual}. Will tokenize from scratch.")
+            sources_cache = json.loads(sources_path.read_text())
+            if "val_sources" not in sources_cache or "test_sources" not in sources_cache:
+                raise ValueError("sources_cache.json missing required keys")
 
-        if not cache_valid:
-            print("Tokenizing all splits from scratch ...")
+            val_sources = sources_cache["val_sources"]
+            test_sources = sources_cache["test_sources"]
+            tokenized_test = tokenized["test"]
+            print(f"Cache loaded and validated: {tokenized}")
+
+        except Exception as e:
+            print(f"Cache invalid ({e}), falling through to slow path...")
+            tokenized = None
+
+    # --- Slow path: build examples from scratch ---
+    if tokenized is None:
+        print("Loading lines...")
+        lines = load_and_sort_lines(data_path)
+        print(f"Loaded {len(lines)} lines from {data_path}")
+        print("Building examples...")
+        examples = build_byt5_examples(
+            lines,
+            oversample_abbr=args.oversample_abbr,
+            lang_prefix=args.lang_prefix,
+            seed=args.seed,
+            marker_dropout=args.marker_dropout,
+            context_lines=args.context_lines,
+        )
+        print(f"Built {len(examples)} examples")
+        print("Splitting dataset...")
+        train_ex, val_ex, test_ex = document_split(examples, seed=args.seed)
+        print(f"Train: {len(train_ex)} | Val: {len(val_ex)} | Test: {len(test_ex)}")
+
+        val_sources = [e["source"] for e in val_ex]
+        test_sources = [e["source"] for e in test_ex]
+
+        if not train_ex:
+            print("Warning: empty train set, using full dataset for training")
+            train_ex = examples
+        if not val_ex:
+            print("Warning: empty val set, using full dataset for validation")
+            val_ex = examples
+        if not test_ex:
+            print("Warning: empty test set, using full dataset for evaluation")
+            test_ex = examples
+
+        if args.eval_only:
+            print("Eval-only mode: tokenizing just the test split...")
+            tokenized_test = tokenize_examples(test_ex, strip_markers=True)
+
+        else:
+            print("Tokenizing all splits...")
             tokenized = DatasetDict({
-                "train": tokenize_examples(train_ex, strip_markers=False),  # markers kept (or dropped randomly via marker_dropout)
-                "val":   tokenize_examples(val_ex, strip_markers=True),     # always strip markers
-                "test":  tokenize_examples(test_ex, strip_markers=True),    # always strip markers
+                "train": tokenize_examples(train_ex, strip_markers=False),
+                "val":   tokenize_examples(val_ex, strip_markers=True),
+                "test":  tokenize_examples(test_ex, strip_markers=True),
             })
+            tokenized_test = tokenized["test"]
+
             if args.use_cache:
                 tokenized.save_to_disk(str(cache_path))
                 print(f"Tokenized dataset cached to {cache_path}")
+
+                sources_path.write_text(json.dumps({
+                    "val_sources": val_sources,
+                    "test_sources": test_sources,
+                }, ensure_ascii=False))
+                print(f"Sources cached to {sources_path}")
+
                 if use_hub:
                     print("Uploading tokenized cache to Hub...")
                     try:
@@ -605,19 +597,33 @@ def main():
                         print(f"Warning: cache upload failed ({e}). "
                               "Training will continue.")
 
-        print(f"Tokenized dataset: {tokenized}")
-        tokenized_test = tokenized["test"]
+            print(f"Tokenized dataset: {tokenized}")
+
+    print("Tokenized dataset ready")
 
     # With epochs=0, we do example creation and tokenization only (with caching if enabled)
     if args.epochs == 0:
         print("Epochs=0: tokenization complete, exiting.")
         return
 
+    print(f"Number of GPUs: {torch.cuda.device_count()}")
+    print(f"Model device: {model.device}")
+    print(f"Local rank: {os.environ.get('LOCAL_RANK', 'N/A')}")
+    print(f"World size: {os.environ.get('WORLD_SIZE', 'N/A')}")
+    print(f"Is distributed: {torch.distributed.is_initialized() if torch.distributed.is_available() else False}")
+
+    print("Initializing data collator...")
+    collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        label_pad_token_id=-100,
+        pad_to_multiple_of=8,
+    )
+
     # --- Training ---
     if not args.eval_only:
 
-        # Metrics closure over val sources
-        val_sources     = [e["source"] for e in val_ex]
+        # val_sources is already set — either from cache or from val_ex above
         compute_metrics = make_compute_metrics(
             tokenizer, val_sources, args.cap_eval
         )
@@ -739,7 +745,7 @@ def main():
             trainer.push_to_hub(commit_message="Best checkpoint after training")
 
     # --- Test evaluation (in both training and eval_only mode) ---
-    test_sources = [e["source"] for e in test_ex]
+    # test_sources is already set — either from cache or from test_ex above
 
     # eval-only mode: we can do with light-weight trainer just for prediction
     if args.eval_only:
