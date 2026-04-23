@@ -125,7 +125,7 @@ def parse_args():
     p.add_argument("--wandb_entity",      default=os.environ.get("WANDB_ENTITY", None))
     p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
     p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
-    p.add_argument("--attn_implementation", default=None, help="Attention backend: 'eager' (default), 'flash_attention_2', or None")
+    p.add_argument("--attn_implementation", default='eager', help="Attention backend: 'eager' (default), 'flash_attention_2', or None")
     p.add_argument("--gradient_checkpointing", action="store_true")
 
     # HPC: save_total_limit for checkpoint disk management
