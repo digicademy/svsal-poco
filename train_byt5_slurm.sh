@@ -140,7 +140,7 @@ srun python byt5/train_byt5.py \
     --wandb_project byt5-salamanca-abbr \
     --wandb_entity mpilhlt \
     --use_cache \
-    --eval_strategy "epoch" \
+    --eval_strategy epoch \
     --cap_eval 1000 \
     --save_total_limit 3 \
     --epochs 10 \
@@ -154,7 +154,7 @@ srun python byt5/train_byt5.py \
     --gradient_accumulation_steps 2 \
     --eval_batch_size 64 \
     --max_input_length 512 \
-    --max_target_length 384 \
+    --max_target_length 384 
 
 # 2-GPU settings:
 #    --train_batch_size 32 \
