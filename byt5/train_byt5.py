@@ -464,13 +464,13 @@ def main():
     print(f"Tokenizer loaded from: {model_id}")
 
     # Optional: torch.compile for fused operations across ByT5's deep encoder
-    if not args.eval_only and torch.__version__ >= "2.0":
-        try:
-            print("Compiling model with torch.compile...")
-            model = torch.compile(model)
-            print("Model compiled with torch.compile")
-        except Exception as e:
-            print(f"torch.compile failed ({e}), continuing without compilation")
+    # if not args.eval_only and torch.__version__ >= "2.0":
+    #     try:
+    #         print("Compiling model with torch.compile...")
+    #         model = torch.compile(model)
+    #         print("Model compiled with torch.compile")
+    #     except Exception as e:
+    #         print(f"torch.compile failed ({e}), continuing without compilation")
 
     # --- Data loading and tokenization ---
     cache_path = output_dir / "tokenized_cache"
