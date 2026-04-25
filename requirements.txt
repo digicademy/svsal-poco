@@ -8,6 +8,7 @@ evaluate==0.4.6
 huggingface-hub==1.9.0
 jiwer==4.0.0
 joblib==1.5.3
+lxml
 pydantic==2.12.5
 sentencepiece==0.2.1
 git+https://github.com/digicademy/svsal-poco

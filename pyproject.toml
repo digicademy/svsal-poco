@@ -15,6 +15,7 @@ dependencies = [
     "codecarbon>=2.3.0",
     "wandb>=0.16.0",
     # "flash-attn",
+    "lxml",
     "sentencepiece",
 ]
 
