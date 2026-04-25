@@ -204,15 +204,14 @@ def build_byt5_examples(
                 source = source.replace(ABBR_OPEN, "").replace(ABBR_CLOSE, "")
 
             if lang_prefix:
-                lang_token = LANG_TOKENS.get(lang[0], LANG_TOKENS["default"])
-                source = f"{lang_token} {source}"
+                source = f"{lang} {source}"
 
             examples.append({
                 "source":   source,
                 "target":   target,
                 "has_abbr": has_abbr,
                 "doc_id":   doc_id,
-                "lang":     lang[0] if lang else "la",
+                "lang":     lang if lang else "la",
             })
 
     # Oversample abbreviation-containing examples
