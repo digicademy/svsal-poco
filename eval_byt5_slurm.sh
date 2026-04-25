@@ -1,30 +1,43 @@
 #!/bin/bash
 #SBATCH --mail-type=none
 #SBATCH --mail-user=wagner@lhlt.mpg.de
-# #SBATCH --output=/ptmp/%u/byt5-salamanca/logs/eval_%j.out
 #SBATCH --output=eval_%j.out
 #SBATCH --error=eval_%j.err
 #SBATCH --job-name=byt5-eval-salamanca
 #SBATCH -D .                   # Initial working directory
 
-# --- Change the following for testing the workflow/GPU setup ---
-#SBATCH --time=23:30:00	        # apudev has walltime of 15 min, apu of 24h
-#SBATCH --partition=apu         # check actual partition name
-# #SBATCH --partition=apudev      # Viper: for testing, 1 node with 2 MI300, 15 min. walltime
-
 #SBATCH --constraint="apu"
 #SBATCH --nodes=1
 
+# --- Change the following for testing the workflow/GPU setup ---
+#SBATCH --time=23:30:00         # apudev has walltime of 15 min, apu of 24h
+#SBATCH --partition=apu         # check actual partition name
+# #SBATCH --partition=apudev      # Viper apudev: for testing, 1 node with 2 MI300, 15 min. walltime
+
 # --- VIPER default case: use a single APU on a shared node ---
-#SBATCH --gres=gpu:1            # One node
-#SBATCH --ntasks=1              # One task
-#SBATCH --cpus-per-task=16      # 1/8 of available CPUs
-#SBATCH --mem=110000            # of 128000
+# #SBATCH --gres=gpu:1            # One node
+# #SBATCH --ntasks=1              # One task
+# #SBATCH --cpus-per-task=16      # 1/8 of available CPUs
+# #SBATCH --mem=110000            # of 128000
 
 # --- VIPER alternative case: two APUs on a shared node ---
-# #SBATCH --gres=gpu:2            # Two GPUs
-# #SBATCH --cpus-per-task=48      # 2/8 of available CPUs
-# #SBATCH --mem=220000
+#SBATCH --gres=gpu:2            # Two GPUs
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=220000
+
+# --- DAIS: H200 on a shared node would be ---
+# #SBATCH --partition="gpu1"    # request a shared node.
+# #SBATCH --gres=gpu:h200:1     # use 1 H200.
+# #SBATCH --cpus-per-task=12    # request 1/8 of available CPUs on a H200 node.
+# #SBATCH --mem=250000          # grant the job access to 1/8 of the memory on a H200 node.
+
+# --- DAIS: 2 H200 GPUs on a shared node ---
+# #SBATCH --partition="gpu1"    # request a shared node.
+# #SBATCH --gres=gpu:h200:2     # use 2 GPU on a shared node.
+# #SBATCH --ntasks-per-node=2   # request 2 tasks on that node (1 per gpu).
+# #SBATCH --cpus-per-task=12    # request 1/8 of available CPUs on the node *per task*.
+# #SBATCH --mem=500000          # grant the job access to 2/8 of the memory on the node.
 
 # ============================================================
 # Environment setup
@@ -98,24 +111,26 @@ echo "GPU:  $(rocm-smi --showproductname 2>/dev/null || echo 'N/A')"
 
 srun python byt5/train_byt5.py \
     --dataset_local "$PTMP_BASE/datasets/salamanca-abbr/data.jsonl" \
-    --eval_model_dir "$PTMP_BASE/models/byt5-salamanca-abbr-hub" \
+    --eval_model_dir "$PTMP_BASE/output/final_model" \
     --output_dir "$OUTPUT_DIR" \
     --wandb_project byt5-salamanca-abbr \
     --wandb_entity mpilhlt \
+    --use_cache \
+    --eval_strategy epoch \
+    --cap_eval 1000 \
+    --save_total_limit 3 \
     --epochs 10 \
     --learning_rate 1e-4 \
-    --oversample_abbr 2.0 \
-    --train_batch_size 64 \
-    --eval_batch_size 128 \
-    --eval_strategy "epoch" \
-    --cap_eval 1000 \
-    --gradient_accumulation_steps 2 \
-    --max_input_length 256 \
-    --max_target_length 192 \
-    --tokenizer_num_proc 8 \
+    --tokenizer_num_proc 16 \
     --bf16 \
+    --oversample_abbr 2.0 \
     --marker_dropout 0.5 \
-    --use_cache \
+    --context_lines 1 \
+    --train_batch_size 32 \
+    --gradient_accumulation_steps 2 \
+    --eval_batch_size 64 \
+    --max_input_length 512 \
+    --max_target_length 384 \
     --seed 42 \
     --eval_only
 
