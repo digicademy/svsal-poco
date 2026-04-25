@@ -30,7 +30,7 @@ from data.data_utils import (
     CorpusLexicon,
 )
 from infer import run_pipeline
-
+from tei.tei_roundtrip import process_tei_xml
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -470,18 +470,74 @@ def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
 # XML tab placeholder
 # ---------------------------------------------------------------------------
 
-def run_xml_pipeline(xml_file) -> str | None:
+@spaces.GPU(duration=300)
+def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
     """
-    Placeholder for TEI XML processing.
-    Will accept a TEI XML file, strip to plaintext, run the pipeline,
-    and reinsert expansions into the XML structure.
-    Not yet implemented.
+    Process TEI XML: expand abbreviations and mark boundaries.
+    Returns (expanded_xml, status_message).
     """
-    return (
-        "XML processing is not yet available. "
-        "Please use the plain text tab for now."
-    )
+    if not xml_string or not xml_string.strip():
+        return "", "No input provided."
 
+    if not _models_loaded:
+        return "", f"Models not loaded: {_load_error}"
+
+    try:
+        def pipeline_fn(line_rows):
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+            ) as tmp:
+                for row in line_rows:
+                    tmp.write(json.dumps(row, ensure_ascii=False) + "\n")
+                input_path = tmp.name
+
+            output_path = input_path.replace(".jsonl", "_out.jsonl")
+
+            try:
+                run_pipeline(
+                    input_path=input_path,
+                    output_path=output_path,
+                    boundary_model=boundary_model,
+                    boundary_tokenizer=boundary_tokenizer,
+                    boundary_threshold=boundary_threshold,
+                    byt5_model=byt5_model,
+                    byt5_tokenizer=byt5_tokenizer,
+                    batch_size=16,
+                )
+
+                with open(output_path, encoding="utf-8") as f:
+                    out_rows = [json.loads(l) for l in f if l.strip()]
+
+                expanded_dict = {
+                    r["id"]: r.get("expanded_text", r["source_sic"])
+                    for r in out_rows
+                }
+                boundary_dict = {
+                    r["id"]: r["predicted_nonbreaking_next_line"]
+                    for r in out_rows
+                    if r.get("predicted_nonbreaking_next_line")
+                }
+                return expanded_dict, boundary_dict
+
+            finally:
+                if os.path.exists(input_path):
+                    os.unlink(input_path)
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+
+        result_xml = process_tei_xml(xml_string, pipeline_fn)
+
+        n_choices = result_xml.count("<choice>") - xml_string.count("<choice>")
+        n_breaks = result_xml.count('break="no"') - xml_string.count('break="no"')
+
+        status = (
+            f"Done. Added {n_choices} abbreviation expansion(s) "
+            f"and {n_breaks} nonbreaking boundary marker(s)."
+        )
+        return result_xml, status
+
+    except Exception as e:
+        return "", f"Error: {e}"
 
 # ---------------------------------------------------------------------------
 # UI
@@ -628,41 +684,40 @@ with gr.Blocks(
         # ---------------------------------------------------------------
         with gr.Tab("TEI XML processing"):
             gr.Markdown(
-                "### Coming soon\n\n"
-                "This tab will accept a TEI XML file, run the full pipeline, "
-                "and return a corrected TEI XML file with abbreviations expanded "
-                "and `<expan>` elements properly filled in.\n\n"
-                "The plain text tabs above are available in the meantime."
+                "### TEI XML abbreviation expansion\n\n"
+                "Paste a TEI XML fragment. The pipeline will expand "
+                "abbreviations (wrapping them in "
+                "`<choice><abbr>…</abbr><expan>…</expan></choice>`) "
+                "and mark nonbreaking line boundaries with `break=\"no\"`."
             )
 
             with gr.Row():
                 with gr.Column(scale=1):
-                    xml_input = gr.File(
-                        label="Upload TEI XML file",
-                        file_types=[".xml"],
-                        interactive=False,   # disabled until implemented
+                    xml_input = gr.Textbox(
+                        label="Input TEI XML",
+                        lines=15,
+                        placeholder="Paste TEI XML here...",
                     )
                     xml_btn = gr.Button(
-                        "Process XML (not yet available)",
-                        variant="secondary",
-                        interactive=False,
+                        "Process XML",
+                        variant="primary",
                     )
 
                 with gr.Column(scale=1):
-                    xml_output = gr.File(
+                    xml_output = gr.Textbox(
                         label="Processed TEI XML",
+                        lines=15,
                         interactive=False,
                     )
                     xml_status = gr.Textbox(
                         label="Status",
-                        value="XML processing is not yet implemented.",
                         interactive=False,
                     )
 
             xml_btn.click(
                 fn=run_xml_pipeline,
                 inputs=xml_input,
-                outputs=xml_status,
+                outputs=[xml_output, xml_status],
             )
 
     # -------------------------------------------------------------------
