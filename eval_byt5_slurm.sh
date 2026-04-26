@@ -74,6 +74,8 @@ mkdir -p "$WANDB_DIR"
 # CUDA settings
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
+export PYTHONUNBUFFERED=1
+
 # ============================================================
 # Load modules
 # ============================================================
