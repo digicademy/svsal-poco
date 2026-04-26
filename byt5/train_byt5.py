@@ -22,6 +22,7 @@
 # model. The model presupposes the availability of this concatenation
 # information in inferencing.
 
+# --- Imports ---
 import sys
 print("Starting imports...", flush=True)
 
@@ -38,6 +39,12 @@ print("numpy ok", flush=True)
 import torch
 print("torch ok", flush=True)
 
+import evaluate as hf_evaluate
+print("evaluate ok", flush=True)
+
+from datasets import Dataset, DatasetDict
+print("datasets ok", flush=True)
+
 # HPC: conditionally import wandb (may run in offline mode)
 try:
     import wandb
@@ -45,16 +52,6 @@ try:
     print("wandb ok", flush=True)
 except ImportError:
     HAS_WANDB = False
-
-import evaluate as hf_evaluate
-print("evaluate ok", flush=True)
-
-from datasets import Dataset, DatasetDict
-print("datasets ok", flush=True)
-
-# HPC: Maybe we have CUDA, maybe ROC, Triton or sth.
-if torch.cuda.is_available() and "CUDA" in torch.cuda.get_device_name(0).upper():
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from transformers import (
     AutoTokenizer,
@@ -80,23 +77,21 @@ print("data_utils ok", flush=True)
 from evaluation.evaluation import compute_span_cer, extract_cer
 print("evaluation ok", flush=True)
 
-_cer_metric = None
-def get_cer_metric():
-    global _cer_metric
-    if _cer_metric is None:
-        _cer_metric = hf_evaluate.load("cer")
-    return _cer_metric
+# --- Global variables, environment setup and helper functions ---
+if torch.cuda.is_available() and "CUDA" in torch.cuda.get_device_name(0).upper():
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 ABBR_OPEN = "⦃"
 ABBR_CLOSE = "⦄"   # U+2984
 
+_cer_metric = None
 
 def _ts():
     return datetime.now().strftime("%H:%M:%S")
 
 
 # ---------------------------------------------------------------------------
-# Arguments
+# Parse Commandline Arguments
 # ---------------------------------------------------------------------------
 
 def parse_args():
@@ -124,25 +119,22 @@ def parse_args():
     p.add_argument("--wandb_project",     default=os.environ.get("WANDB_PROJECT", "byt5-salamanca-abbr"))
     p.add_argument("--wandb_entity",      default=os.environ.get("WANDB_ENTITY", None))
     p.add_argument("--use_cache",         action="store_true", help="Load tokenized dataset from cache if available")
-    p.add_argument("--tokenizer_num_proc", type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
-    p.add_argument("--attn_implementation", default='eager', help="Attention backend: 'eager' (default), 'flash_attention_2', or None")
+    p.add_argument("--tokenizer_num_proc",     type=int, default=1, help="Number of processes for tokenization. Use >1 to speed up on multi-core machines.")
+    p.add_argument("--attn_implementation",    default='eager', help="Attention backend: 'eager' (default), 'flash_attention_2', or None")
     p.add_argument("--gradient_checkpointing", action="store_true")
-
-    # HPC: save_total_limit for checkpoint disk management
-    p.add_argument("--save_total_limit",  type=int, default=3, help="Max checkpoints to keep on disk (oldest deleted)")
-    # HPC: eval_model_dir to point at a local model directory for eval_only
-    p.add_argument("--eval_model_dir", default=None, help="Local directory containing model to evaluate (for eval_only without Hub access)")
+    p.add_argument("--save_total_limit",       type=int, default=3, help="Max checkpoints to keep on disk (oldest deleted)")
+    p.add_argument("--eval_model_dir",         default=None, help="Local directory containing model to evaluate (for eval_only without Hub access)")
 
     data_group = p.add_mutually_exclusive_group(required=True)
     data_group.add_argument("--dataset_repo",  default=None, help="HF dataset repo id (for Hub/Jobs mode)")
     data_group.add_argument("--dataset_local", default=None, help="Local JSONL path (for local testing mode)")
 
     precision_group = p.add_mutually_exclusive_group()
-    precision_group.add_argument("--bf16", action="store_true", help="Use bf16 mixed precision (A10G support; requires compatible GPU and drivers)")
-    precision_group.add_argument("--fp16", action="store_true", help="Use fp16 mixed precision (for GPUs without bf16 support; requires compatible GPU and drivers)")
+    precision_group.add_argument("--bf16",     action="store_true", help="Use bf16 mixed precision (A10G support; requires compatible GPU and drivers)")
+    precision_group.add_argument("--fp16",     action="store_true", help="Use fp16 mixed precision (for GPUs without bf16 support; requires compatible GPU and drivers)")
     resume_group = p.add_mutually_exclusive_group()
-    resume_group.add_argument("--eval_only", action="store_true", help="Skip training, run test eval only")
-    resume_group.add_argument("--no_resume", action="store_true", help="Train from scratch ignoring existing checkpoints")
+    resume_group.add_argument("--eval_only",   action="store_true", help="Skip training, run test eval only")
+    resume_group.add_argument("--no_resume",   action="store_true", help="Train from scratch ignoring existing checkpoints")
     return p.parse_args()
 
 
@@ -158,7 +150,7 @@ def make_tokenize_fn(tokenizer, max_input_length, max_target_length):
     combining characters (macrons, brevigraphs, etc.) and the
     ⦃⦄ delimiters are all handled correctly without special casing.
 
-    Padding is deferred to the DataCollatorForSeq2Seq, which pads
+    Padding is deferred to the Data Collator, which pads
     per-batch rather than globally — important for ByT5's long sequences.
     """
     def tokenize(batch):
@@ -205,12 +197,116 @@ def decode_predictions(tokenizer, predictions, labels):
 
 
 # ---------------------------------------------------------------------------
+# Evaluation: prediction and compute_metrics callback
+# ---------------------------------------------------------------------------
+
+def streaming_predict(trainer, dataset, tokenizer, max_length):
+    """Generate and decode batch-by-batch, avoiding the giant padded array."""
+    dataloader = trainer.get_eval_dataloader(dataset)
+    model = trainer.model
+    model.eval()
+
+    all_preds = []
+    all_labels = []
+
+    for batch_i, inputs in enumerate(dataloader):
+        inputs = trainer._prepare_inputs(inputs)
+        labels = inputs.pop("labels", None)
+
+        with torch.no_grad():
+            generated = model.generate(**inputs, max_length=max_length)
+
+        gen_np = generated.cpu().numpy()
+        batch_preds = tokenizer.batch_decode(gen_np, skip_special_tokens=True)
+        all_preds.extend(batch_preds)
+
+        if labels is not None:
+            lab_np = labels.cpu().numpy()
+            import numpy as np
+            lab_np = np.where(lab_np != -100, lab_np, tokenizer.pad_token_id)
+            batch_labels = tokenizer.batch_decode(lab_np, skip_special_tokens=True)
+            all_labels.extend(batch_labels)
+
+        if (batch_i + 1) % 50 == 0:
+            print(f"[{_ts()}] streaming_predict: {batch_i+1}/{len(dataloader)}, "
+                  f"{len(all_preds)} decoded", flush=True)
+
+    return all_preds, all_labels
+
+def get_cer_metric():
+    global _cer_metric
+    if _cer_metric is None:
+        _cer_metric = hf_evaluate.load("cer")
+    return _cer_metric
+
+def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
+    """
+    Returns a compute_metrics function for Seq2SeqTrainer.
+
+    val_sources: the marked input strings for the val set, captured in
+    a closure. Used to compute span-level CER during validation without
+    threading extra state through the Trainer API.
+
+    Note: assumes single-node training (Trainer preserves val set order).
+    For cross-node, disable span metrics during training and run post-hoc.
+    """
+
+    if cap_eval is None:
+        cap_eval = len(val_sources)
+
+    def compute_metrics(eval_preds):
+
+        preds, labels = eval_preds
+        if isinstance(preds, tuple):
+            preds = preds[0]
+
+        print(f"[{_ts()}] compute_metrics: decoding {len(preds)} predictions ...")
+        decoded_preds, decoded_labels = decode_predictions(
+            tokenizer, preds, labels
+        )
+
+        print(f"[{_ts()}] compute_metrics: decoding done. Starting full-line CER ...")
+        # Sample to avoid jiwer hanging on large val sets
+        try:
+            full_line_cer_result = get_cer_metric().compute(
+                predictions=decoded_preds[:cap_eval],
+                references=decoded_labels[:cap_eval],
+            )
+            full_line_cer = extract_cer(full_line_cer_result) if full_line_cer_result else 0.0
+        except ZeroDivisionError:
+            full_line_cer = 0.0
+
+        # Cap val_sources to match decoded_preds length
+        # to avoid passing 314k sources when only 10k were evaluated
+        capped_val_sources = val_sources[:len(decoded_preds)]
+        print(f"[{_ts()}] compute_metrics: full-line CER done ({full_line_cer:.4f}). Starting span CER over {len(capped_val_sources)} sources ...")
+
+        span_results = compute_span_cer(
+            marked_inputs=capped_val_sources,
+            model_outputs=decoded_preds,
+            target_corrs=decoded_labels,
+            include_breakdown=False,   # skip expensive breakdown during training
+            max_source_lines=cap_eval,
+        )
+        print(f"[{_ts()}] compute_metrics: span CER done, returning metrics")
+
+        return {
+            "full_line_cer":    round(full_line_cer, 4),
+            "span_cer":         round(span_results["span_cer"] or 0.0, 4),
+            "span_exact_match": round(span_results["span_exact_match"] or 0.0, 4),
+            "n_spans":          span_results["n_spans"],
+        }
+
+    return compute_metrics
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint management
 # ---------------------------------------------------------------------------
 
 def find_resume_checkpoint_local(checkpoints_dir: Path) -> str | None:
     """
-    HPC: Find the latest checkpoint in the local checkpoints directory.
+    Find the latest checkpoint in the local checkpoints directory.
     Returns the path to the latest checkpoint, or None if none found.
     """
     if not checkpoints_dir.exists():
@@ -292,74 +388,12 @@ def find_resume_checkpoint_hub(api: HfApi, repo_id: str, local_dir: Path) -> str
 
 
 # ---------------------------------------------------------------------------
-# compute_metrics callback
-# ---------------------------------------------------------------------------
-
-def make_compute_metrics(tokenizer, val_sources, cap_eval=None):
-    """
-    Returns a compute_metrics function for Seq2SeqTrainer.
-
-    val_sources: the marked input strings for the val set, captured in
-    a closure. Used to compute span-level CER during validation without
-    threading extra state through the Trainer API.
-
-    Note: assumes single-GPU training (Trainer preserves val set order).
-    For multi-GPU, disable span metrics during training and run post-hoc.
-    """
-
-    if cap_eval is None:
-        cap_eval = len(val_sources)
-
-    def compute_metrics(eval_preds):
-
-        preds, labels = eval_preds
-        if isinstance(preds, tuple):
-            preds = preds[0]
-
-        print(f"[{_ts()}] compute_metrics: decoding {len(preds)} predictions ...")
-        decoded_preds, decoded_labels = decode_predictions(
-            tokenizer, preds, labels
-        )
-
-        print(f"[{_ts()}] compute_metrics: decoding done. Starting full-line CER ...")
-        # Sample to avoid jiwer hanging on large val sets
-        try:
-            full_line_cer_result = get_cer_metric().compute(
-                predictions=decoded_preds[:cap_eval],
-                references=decoded_labels[:cap_eval],
-            )
-            full_line_cer = extract_cer(full_line_cer_result) if full_line_cer_result else 0.0
-        except ZeroDivisionError:
-            full_line_cer = 0.0
-
-        # Cap val_sources to match decoded_preds length
-        # to avoid passing 314k sources when only 10k were evaluated
-        capped_val_sources = val_sources[:len(decoded_preds)]
-        print(f"[{_ts()}] compute_metrics: full-line CER done ({full_line_cer:.4f}). Starting span CER over {len(capped_val_sources)} sources ...")
-
-        span_results = compute_span_cer(
-            marked_inputs=capped_val_sources,
-            model_outputs=decoded_preds,
-            target_corrs=decoded_labels,
-            include_breakdown=False,   # skip expensive breakdown during training
-            max_source_lines=cap_eval,
-        )
-        print(f"[{_ts()}] compute_metrics: span CER done, returning metrics")
-
-        return {
-            "full_line_cer":    round(full_line_cer, 4),
-            "span_cer":         round(span_results["span_cer"] or 0.0, 4),
-            "span_exact_match": round(span_results["span_exact_match"] or 0.0, 4),
-            "n_spans":          span_results["n_spans"],
-        }
-
-    return compute_metrics
-
-
-# ---------------------------------------------------------------------------
 # Carbon tracking callback --- optional but
 # recommended for monitoring training emissions,
-# especially on GPU.
+# especially on GPU. May or may not be compatible
+# with your environment, however. Disable by commenting
+# out the callback in the Trainer initialization if it
+# causes issues.
 # ---------------------------------------------------------------------------
 
 class CarbonTrackerCallback(TrainerCallback):
@@ -393,6 +427,9 @@ class CarbonTrackerCallback(TrainerCallback):
 
 def main():
     print("Starting ByT5 training", flush=True)
+
+    # ==== Parse and check command-line arguments, set up environment ====
+
     args = parse_args()
     random.seed(args.seed)
     use_hub = args.output_repo is not None
@@ -403,7 +440,7 @@ def main():
     if args.eval_strategy == "no" and args.cap_eval:
         print("Warning: --cap_eval has no effect with --eval_strategy no")
 
-    # HPC: Hub login only when explicitly using Hub mode
+    # Hub login only when explicitly using Hub mode
     api = None
     if use_hub:
         if not args.hf_token:
@@ -411,7 +448,7 @@ def main():
         api = HfApi()
         login(token=args.hf_token)
 
-    # --- Fail fast if GPU requested but unavailable ---
+    # Fail fast if GPU requested but unavailable
     if args.bf16 or args.fp16:
         if not torch.cuda.is_available():
             raise RuntimeError(
@@ -420,7 +457,7 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
-    # --- Resolve data path ---
+    # --- Resolve paths ---
     if args.dataset_local:
         data_path = args.dataset_local
         print(f"Local mode: reading from {data_path}")
@@ -436,8 +473,12 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = output_dir / "tokenized_cache"
+    sources_path = output_dir / "sources_cache.json"
 
-    # --- Define model_id and load model ---
+
+    # ==== Load model, tokenizer, collator ====
+
     # If eval_only is set, we want to load the best model from local disk
     # or from the Hub (if available)
     # otherwise we'll train from scratch and load the base model - 
@@ -463,6 +504,14 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     print(f"Tokenizer loaded from: {model_id}")
 
+    print("Initializing data collator...")
+    collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        label_pad_token_id=-100,
+        pad_to_multiple_of=8,
+    )
+
     # Optional: torch.compile for fused operations across ByT5's deep encoder
     # if not args.eval_only and torch.__version__ >= "2.0":
     #     try:
@@ -472,14 +521,12 @@ def main():
     #     except Exception as e:
     #         print(f"torch.compile failed ({e}), continuing without compilation")
 
-    # --- Data loading and tokenization ---
-    cache_path = output_dir / "tokenized_cache"
-    sources_path = output_dir / "sources_cache.json"
+
+    # ==== Data preparation: loading and tokenization ====
 
     tokenize_fn = make_tokenize_fn(
         tokenizer, args.max_input_length, args.max_target_length,
     )
-
     def tokenize_examples(exs, strip_markers=False) -> Dataset:
         """Build a HF Dataset from raw examples and tokenize it."""
         sources = [e["source"] for e in exs]
@@ -498,7 +545,6 @@ def main():
 
     # --- Fast path: load from cache, skip example building entirely ---
     tokenized = None
-
     if not args.eval_only and args.use_cache and cache_path.exists() and sources_path.exists():
         print("Attempting to load tokenized dataset from cache...")
         try:
@@ -601,10 +647,17 @@ def main():
 
     print("Tokenized dataset ready")
 
-    # With epochs=0, we do example creation and tokenization only (with caching if enabled)
+    # With epochs=0, we abort now, with only example creation and
+    # tokenization done (with caching if enabled). This is useful for
+    # preparing the dataset and cache for later training runs,
+    # especially on HPC where tokenization is CPU-bound and can be
+    # done in a separate job from the GPU-bound training.
     if args.epochs == 0:
         print("Epochs=0: tokenization complete, exiting.")
         return
+
+
+    # ==== Training ====
 
     print(f"Number of GPUs: {torch.cuda.device_count()}")
     print(f"Model device: {model.device}")
@@ -612,15 +665,6 @@ def main():
     print(f"World size: {os.environ.get('WORLD_SIZE', 'N/A')}")
     print(f"Is distributed: {torch.distributed.is_initialized() if torch.distributed.is_available() else False}")
 
-    print("Initializing data collator...")
-    collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model,
-        label_pad_token_id=-100,
-        pad_to_multiple_of=8,
-    )
-
-    # --- Training ---
     if not args.eval_only:
 
         # val_sources is already set — either from cache or from val_ex above
@@ -744,7 +788,8 @@ def main():
             print("Pushing best model to Hub...")
             trainer.push_to_hub(commit_message="Best checkpoint after training")
 
-    # --- Test evaluation (in both training and eval_only mode) ---
+
+    # ==== Test Evaluation ====
     # test_sources is already set — either from cache or from test_ex above
 
     # eval-only mode: we can do with light-weight trainer just for prediction
@@ -763,20 +808,17 @@ def main():
         )
         print(f"Trainer is using DDP: {trainer.args.distributed_state is not None}")
 
-
     print("Running test evaluation. Predicting...")
-    test_output = trainer.predict(tokenized_test)
-    test_preds, test_labels = decode_predictions(
-        tokenizer,
-        test_output.predictions,
-        test_output.label_ids,
+    test_preds, test_labels = streaming_predict(
+        trainer, tokenized_test, tokenizer, args.max_target_length,
     )
+
     print("Test evaluation complete. Computing test metrics...")
     test_metrics = compute_span_cer(
         marked_inputs=test_sources,
         model_outputs=test_preds,
         target_corrs=test_labels,
-        include_breakdown=True,   # include breakdown for final test evaluation
+        include_breakdown=True,
         max_source_lines=None,    # process everything for the final evaluation
     )
 
@@ -785,6 +827,9 @@ def main():
     print(f"Test full-line CER:    {test_metrics['full_line_cer']:.4f}")
     print(f"Spans evaluated:       {test_metrics['n_spans']}")
 
+
+    # ==== Save and upload results ====
+
     # --- Write breakdown locally ---
     breakdown_path = output_dir / "test_breakdown.json"
     breakdown_path.write_text(
@@ -792,7 +837,7 @@ def main():
     )
     print(f"Wrote test_breakdown.json to {output_dir}/")
 
-    # HPC: Also save a summary metrics file
+    # --- Also save a summary metrics file ---
     metrics_path = output_dir / "test_metrics.json"
     metrics_path.write_text(json.dumps({
         "span_cer": test_metrics["span_cer"],
@@ -802,8 +847,8 @@ def main():
     }, indent=2))
     print(f"Wrote test_metrics.json to {output_dir}/")
 
-    # HPC: In eval_only mode, also save the model cleanly if loaded from
-    # a checkpoint (to create a consistent final_model directory)
+    # --- In eval_only mode, also save the model cleanly if loaded from
+    # a checkpoint (to create a consistent final_model directory) ---
     if args.eval_only:
         final_model_dir = output_dir / "final_model"
         if not final_model_dir.exists():
@@ -827,6 +872,7 @@ def main():
     else:
         print(f"Results saved locally to {output_dir}/")
 
+    print("\nAll done. Exiting.\n\n")
 
 if __name__ == "__main__":
     main()
