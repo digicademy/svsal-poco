@@ -8,19 +8,45 @@
 # handle the full variety of Unicode characters in the source and target text
 # without special-casing, and to learn character-level expansion patterns.
 #
-# The script is designed to run in two modes:
-# 1) Local testing mode: specify a local JSONL path with --dataset_local and
-#    an output directory with --output_dir. No Hub integration.
+#
+# Training/evaluation:
+#
+# The script is designed to be runnable with and without internet access,
+# and even with internet access, it can still run with and without Hugging Face
+# Hub connection:
+#
+# 1) Local/HPC mode: specify a local JSONL path with --dataset_local and
+#    an output directory with --output_dir. Use environment variables to
+#    control offline mode in wandb, module imports, etc. The script will
+#    can run entirely offline.
+#    Use --epochs=0 to run just the data preparation and tokenization steps,
+#    which are CPU-bound and can be done in a separate job on HPC, then run
+#    again with --epochs>0 to do the GPU-bound training using the cached
+#    tokenized dataset.
+#    Use --eval_only with --eval_model_dir to run evaluation only on a local
+#    model checkpoint. This can be used to clean up and standardize the saved
+#    outputs if the training run produced a messy checkpoint directory, or if
+#    the best checkpoint is on the Hub but you want to run evaluation locally
+#    without Hub access.
+#    Use --no_resume to ignore existing checkpoints and train from scratch.
+#    Otherwise, the script will save and look for checkpoints in the output
+#    directory and resume from the latest one if found.
+#
 # 2) HuggingFace Hub/Jobs mode: specify a dataset repo with --dataset_repo and
 #    a model repo with --output_repo. The script will read the data
 #    from the dataset repo, train the model, and push the best checkpoint and
 #    test breakdown to the model repo at the end of training.
 #
-# The model runs as the second stage of a pipeline, following the boundary
-# classifier. The boundary classifier identifies which line pairs should be
-# concatenated before being passed to the ByT5 abbreviation expansion
-# model. The model presupposes the availability of this concatenation
-# information in inferencing.
+#
+# Inferencing:
+#
+# The model is meant to run as the second stage of a pipeline,
+# following the boundary classifier at mpilhlt/canine-salamanca-boundary-classifier.
+# The boundary classifier identifies which line pairs should be concatenated
+# before being passed to the present ByT5 abbreviation expansion model.
+# The model presupposes the availability of this concatenation information in
+# inferencing.
+
 
 # --- Imports ---
 import sys
