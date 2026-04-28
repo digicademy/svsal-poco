@@ -111,6 +111,7 @@ module load amduprof/5.2 python-waterboa/2025.06
 
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
 pip install -r requirements.txt
+pip install --no-deps --force-reinstall -e $HOME/svsal-poco
 
 # Install from the local clone:
 # pip install --no-deps -e $PTMP_BASE/svsal-poco
