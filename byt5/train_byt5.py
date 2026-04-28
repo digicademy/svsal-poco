@@ -622,6 +622,8 @@ def main():
 
             # Build examples only for test lines
             print(f"Eval-only mode: build test examples ({len(test_lines)} lines)...")
+            import data.data_utils as du
+            print(f"                data_utils from: {du.__file__}", flush=True)
             test_ex = build_byt5_examples(
                 test_lines,
                 oversample_abbr=1.0,   # no oversampling for eval
@@ -640,6 +642,8 @@ def main():
 
         else:
             print(f"Building {len(lines)} examples...")
+            import data.data_utils as du
+            print(f"                data_utils from: {du.__file__}", flush=True)
             examples = build_byt5_examples(
                 lines,
                 oversample_abbr=args.oversample_abbr,
