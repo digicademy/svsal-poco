@@ -606,38 +606,66 @@ def main():
         print("Loading lines...")
         lines = load_and_sort_lines(data_path)
         print(f"Loaded {len(lines)} lines from {data_path}")
-        print("Building examples...")
-        examples = build_byt5_examples(
-            lines,
-            oversample_abbr=args.oversample_abbr,
-            lang_prefix=args.lang_prefix,
-            seed=args.seed,
-            marker_dropout=args.marker_dropout,
-            context_lines=args.context_lines,
-        )
-        print(f"Built {len(examples)} examples")
-        print("Splitting dataset...")
-        train_ex, val_ex, test_ex = document_split(examples, seed=args.seed)
-        print(f"Train: {len(train_ex)} | Val: {len(val_ex)} | Test: {len(test_ex)}")
-
-        val_sources = [e["source"] for e in val_ex]
-        test_sources = [e["source"] for e in test_ex]
-
-        if not train_ex:
-            print("Warning: empty train set, using full dataset for training")
-            train_ex = examples
-        if not val_ex:
-            print("Warning: empty val set, using full dataset for validation")
-            val_ex = examples
-        if not test_ex:
-            print("Warning: empty test set, using full dataset for evaluation")
-            test_ex = examples
 
         if args.eval_only:
-            print("Eval-only mode: tokenizing just the test split...")
+            print("Eval-only mode: get test split...")
+            # Get test document IDs without building all examples
+            doc_ids = list({row["doc_id"] for row in lines if "doc_id" in row})
+            random.seed(args.seed)
+            random.shuffle(doc_ids)
+            n_test = max(1, int(len(doc_ids) * 0.1))
+            test_docs = set(doc_ids[:n_test])
+
+            # Filter lines to test documents only
+            test_lines = [row for row in lines if row["doc_id"] in test_docs]
+            print(f"                test documents: {len(test_docs)}, test lines: {len(test_lines)}")
+
+            # Build examples only for test lines
+            print(f"Eval-only mode: build test examples ({len(test_lines)} lines)...")
+            test_ex = build_byt5_examples(
+                test_lines,
+                oversample_abbr=1.0,   # no oversampling for eval
+                marker_dropout=0.0,    # no dropout for eval
+                context_lines=args.context_lines,
+                seed=args.seed,
+            )
+            print(f"                built {len(test_ex)} test examples")
+            test_sources = [e["source"] for e in test_ex]
+            val_sources = []  # not needed in eval-only
+
+            print("Eval-only mode: tokenize just the test split...")
             tokenized_test = tokenize_examples(test_ex, strip_markers=True)
+            print("                tokenized test set ready")
+            tokenized = None  # free memory from train/val tokenization since we won't use it
 
         else:
+            print(f"Building {len(lines)} examples...")
+            examples = build_byt5_examples(
+                lines,
+                oversample_abbr=args.oversample_abbr,
+                lang_prefix=args.lang_prefix,
+                seed=args.seed,
+                marker_dropout=args.marker_dropout,
+                context_lines=args.context_lines,
+            )
+            print(f"Built {len(examples)} examples")
+            print("Splitting dataset...")
+            train_ex, val_ex, test_ex = document_split(examples, seed=args.seed)
+            print(f"Train: {len(train_ex)} | Val: {len(val_ex)} | Test: {len(test_ex)}")
+
+            val_sources = [e["source"] for e in val_ex]
+            test_sources = [e["source"] for e in test_ex]
+
+            if not train_ex:
+                print("Warning: empty train set, using full dataset for training")
+                train_ex = examples
+            if not val_ex:
+                print("Warning: empty val set, using full dataset for validation")
+                val_ex = examples
+            if not test_ex:
+                print("Warning: empty test set, using full dataset for evaluation")
+                test_ex = examples
+
             print("Tokenizing all splits...")
             tokenized = DatasetDict({
                 "train": tokenize_examples(train_ex, strip_markers=False),
@@ -671,8 +699,7 @@ def main():
                               "Training will continue.")
 
             print(f"Tokenized dataset: {tokenized}")
-
-    print("Tokenized dataset ready")
+            print("Tokenized dataset ready")
 
     # With epochs=0, we abort now, with only example creation and
     # tokenization done (with caching if enabled). This is useful for
