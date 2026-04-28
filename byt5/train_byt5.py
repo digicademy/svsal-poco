@@ -241,7 +241,7 @@ def streaming_predict(trainer, dataset, tokenizer, max_length):
         inputs.pop("decoder_input_ids", None)
 
         with torch.no_grad():
-            generated = model.generate(**inputs, max_new_tokens=max_length)
+            generated = model.generate(**inputs, max_new_tokens=max_length, max_length=None)
 
         gen_np = generated.cpu().numpy()
         batch_preds = tokenizer.batch_decode(gen_np, skip_special_tokens=True)
