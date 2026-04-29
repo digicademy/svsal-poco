@@ -632,6 +632,12 @@ def main():
                 seed=args.seed,
             )
             print(f"                built {len(test_ex)} test examples")
+
+            # Cap test set to a manageable size
+            if args.cap_eval and len(test_ex) > args.cap_eval:
+                print(f"Capping test set from {len(test_ex)} to {args.cap_eval}")
+                test_ex = test_ex[:args.cap_eval]
+
             test_sources = [e["source"] for e in test_ex]
             val_sources = []  # not needed in eval-only
 

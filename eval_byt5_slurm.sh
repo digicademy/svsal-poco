@@ -120,7 +120,7 @@ srun python byt5/train_byt5.py \
     --wandb_entity mpilhlt \
     --use_cache \
     --eval_strategy epoch \
-    --cap_eval 1000 \
+    --cap_eval 20000 \
     --save_total_limit 3 \
     --epochs 10 \
     --learning_rate 1e-4 \
