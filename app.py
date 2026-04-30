@@ -387,7 +387,7 @@ def expand_text(text: str) -> tuple[str, str, str]:
             byt5_model=byt5_model,
             byt5_tokenizer=byt5_tokenizer,
             batch_size=16,
-            lang_prefix=True,
+            lang_prefix=False,
         )
 
         with open(output_path, encoding="utf-8") as f:
