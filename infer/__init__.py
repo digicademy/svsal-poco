@@ -364,7 +364,7 @@ def run_pipeline(
     # --- Stage 5: write output ---
     print(f"Writing output to {output_path}...")
     with open(output_path, "w") as f:
-        for row in lines:
+        for row in lines_with_boundaries:
             out_row = dict(row)
             out_row["expanded_text"] = output_by_line_id.get(
                 row["id"], row["source_sic"]
