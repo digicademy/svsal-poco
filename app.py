@@ -398,14 +398,22 @@ def expand_text(text: str) -> tuple[str, str, str]:
         if os.path.exists(output_path):
             os.unlink(output_path)
 
-    # --- Expanded text ---
-    expanded = "\n".join(r.get("expanded_text", r["source_sic"]) for r in out_rows)
-
-    # --- Boundary annotation ---
+    # --- Compute nonbreaking IDs (used by both expanded and boundary tabs) ---
     nonbreaking_ids = {
         r["id"] for r in out_rows
         if r.get("predicted_nonbreaking_next_line", "")
     }
+
+    # --- Expanded text ---
+    expanded_lines = []
+    for r in out_rows:
+        line = r.get("expanded_text", r["source_sic"])
+        if r["id"] in nonbreaking_ids:
+            line += NONBREAKING_MARKER
+        expanded_lines.append(line)
+    expanded = "\n".join(expanded_lines)
+
+    # --- Boundary annotation ---
     boundary_lines = []
     for r in out_rows:
         line = r["source_sic"]
@@ -625,7 +633,7 @@ with gr.Blocks(
                         with gr.Tab("Boundary detection"):
                             full_output_boundaries = gr.Textbox(
                                 lines=12,
-                                label="Detected nonbreaking boundaries (↪ marks continuation)",
+                                label="Detected nonbreaking boundaries (¬ marks continuation)",
                             )
                         with gr.Tab("Changes only"):
                             full_output_diff = gr.Textbox(
@@ -656,7 +664,7 @@ with gr.Blocks(
         with gr.Tab("Boundary detection only"):
             gr.Markdown(
                 "Runs only the Canine boundary classifier. "
-                "Lines marked with ↪ are identified as nonbreaking — "
+                "Lines marked with ¬ are identified as nonbreaking — "
                 "the word at the end of that line continues on the next line."
             )
 
