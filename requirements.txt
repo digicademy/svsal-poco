@@ -1,4 +1,4 @@
-git+https://github.com/digicademy/svsal-poco
+git+https://github.com/digicademy/svsal-poco@07414b2
 spaces
 sentencepiece
 torch==2.6.0
