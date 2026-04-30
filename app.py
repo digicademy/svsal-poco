@@ -249,32 +249,42 @@ def load_models():
             # an issue with the root model loading stemming from aborted training runs
             # leaving inconsistent files in the root.
             byt5_model = T5ForConditionalGeneration.from_pretrained(
-                BYT5_REPO, subfolder="last-checkpoint", tie_word_embeddings=False,
+                BYT5_REPO, tie_word_embeddings=False,
             )
-            print(f"ByT5 loaded from {BYT5_REPO} (last checkpoint)")
+            print(f"ByT5 loaded from {BYT5_REPO} (root)")
  
-        except Exception:
-            # Fall back to latest checkpoint
+        except Exception as e_root:
+            print(f"Error loading ByT5 from root: {e_root}")
+            # Try "final_model" subfolder next, which is where the best checkpoint is saved at the end of training
             try:
-                entries = list(_api.list_repo_tree(
-                    BYT5_REPO, path_in_repo="checkpoints", repo_type="model",
-                ))
-                checkpoint_dirs = sorted(
-                    [e.path for e in entries
-                    if isinstance(e, RepoFolder)
-                    and e.path.startswith("checkpoints/checkpoint-")],
-                    key=lambda x: int(x.rsplit("-", 1)[-1]),
-                )
-                if not checkpoint_dirs:
-                    raise FileNotFoundError("No ByT5 model checkpoints found")
-                latest = checkpoint_dirs[-1]
-                print(f"Loading ByT5 from checkpoint: {latest}")
                 byt5_model = T5ForConditionalGeneration.from_pretrained(
-                    BYT5_REPO, subfolder=latest, tie_word_embeddings=False,
+                    BYT5_REPO, subfolder="final_model", tie_word_embeddings=False,
                 )
-            except Exception as e2:
-                print(f"ByT5 model not available: {e2}")
-                byt5_model = None
+                print(f"ByT5 loaded from {BYT5_REPO} (final_model)")
+            except Exception as e_final:
+                print(f"Error loading ByT5 from final_model: {e_final}")
+
+                # Fall back to latest checkpoint
+                try:
+                    entries = list(_api.list_repo_tree(
+                        BYT5_REPO, path_in_repo="checkpoints", repo_type="model",
+                    ))
+                    checkpoint_dirs = sorted(
+                        [e.path for e in entries
+                        if isinstance(e, RepoFolder)
+                        and e.path.startswith("checkpoints/checkpoint-")],
+                        key=lambda x: int(x.rsplit("-", 1)[-1]),
+                    )
+                    if not checkpoint_dirs:
+                        raise FileNotFoundError("No ByT5 model checkpoints found")
+                    latest = checkpoint_dirs[-1]
+                    print(f"Loading ByT5 from checkpoint: {latest}")
+                    byt5_model = T5ForConditionalGeneration.from_pretrained(
+                        BYT5_REPO, subfolder=latest, tie_word_embeddings=False,
+                    )
+                except Exception as e_latest:
+                    print(f"ByT5 model not available: {e_latest}")
+                    byt5_model = None
 
         if byt5_model is not None:
             byt5_model.eval()
