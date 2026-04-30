@@ -1,5 +1,6 @@
 git+https://github.com/digicademy/svsal-poco@3173be5
 spaces
 sentencepiece
+lxml
 torch==2.6.0
 codecarbon>=2.3.0
