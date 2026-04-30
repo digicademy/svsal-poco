@@ -441,7 +441,7 @@ def expand_text(text: str) -> tuple[str, str, str]:
 # One decorator per function — @spaces.GPU cannot wrap a shared helper
 # ---------------------------------------------------------------------------
 
-@spaces.GPU(duration=300)
+@spaces.GPU(duration=120)
 def run_boundary_only(text: str) -> tuple[str, str]:
     if boundary_model is None:
         return "Boundary model not available — cannot run boundary detection.", ""
@@ -463,7 +463,7 @@ def run_boundary_only(text: str) -> tuple[str, str]:
     return result, carbon_info
 
 
-@spaces.GPU(duration=300)
+@spaces.GPU(duration=120)
 def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
     if byt5_model is None:
         return "ByT5 model not yet trained — abbreviation expansion unavailable.", "", "", ""
