@@ -7,4 +7,6 @@ test-output-byt5/
 *.pt
 *.jsonl
 *.json
+*.err
+*.out
 !pyproject.toml
