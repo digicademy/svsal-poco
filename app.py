@@ -488,7 +488,7 @@ def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
 # XML tab placeholder
 # ---------------------------------------------------------------------------
 
-@spaces.GPU(duration=300)
+@spaces.GPU(duration=120)
 def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
     """
     Process TEI XML: expand abbreviations and mark boundaries.
