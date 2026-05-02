@@ -636,22 +636,30 @@ with gr.Blocks(
                             full_output_expanded = gr.Textbox(
                                 lines=12,
                                 label="Expanded output",
+                                buttons=['⿻'],
+                                show_label=True,
                             )
                         with gr.Tab("Boundary detection"):
                             full_output_boundaries = gr.Textbox(
                                 lines=12,
                                 label="Detected nonbreaking boundaries (¬ marks continuation)",
+                                buttons=['⿻'],
+                                show_label=True,
                             )
                         with gr.Tab("Changes only"):
                             full_output_diff = gr.Textbox(
                                 lines=12,
                                 label="Lines where expansions were made",
+                                buttons=['⿻'],
+                                show_label=True,
                             )
                         with gr.Tab("Environmental cost"):
                             full_output_carbon = gr.Textbox(
                                 lines=4,
                                 label="CO2 emissions",
                                 interactive=False,
+                                buttons=['⿻'],
+                                show_label=True,
                             )
 
             full_btn.click(
@@ -691,11 +699,15 @@ with gr.Blocks(
                     boundary_output = gr.Textbox(
                         lines=12,
                         label="Annotated output",
+                        buttons=['⿻'],
+                        show_label=True,
                     )
                     boundary_carbon = gr.Textbox(
                         lines=4,
                         label="CO2 emissions",
                         interactive=False,
+                        buttons=['⿻'],
+                        show_label=True,
                     )
 
             boundary_btn.click(
@@ -733,11 +745,15 @@ with gr.Blocks(
                         label="Processed TEI XML",
                         lines=15,
                         interactive=False,
+                        buttons=['⿻'],
+                        show_label=True,
                     )
                     xml_status = gr.Textbox(
                         label="Status",
                         lines=3,
                         interactive=False,
+                        buttons=['⿻'],
+                        show_label=True,
                     )
 
             xml_btn.click(
