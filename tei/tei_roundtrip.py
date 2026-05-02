@@ -31,13 +31,40 @@ TEI_NS = "http://www.tei-c.org/ns/1.0"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 NSMAP  = {"tei": TEI_NS, "xml": XML_NS}
 
-def _tei(tag: str) -> str:
-    """Build a Clark-notation tag name in the TEI namespace."""
-    return f"{{{TEI_NS}}}{tag}"
+
+def _detect_namespace(root: etree._Element) -> str:
+    """
+    Detect whether the document uses the TEI namespace.
+    Returns the namespace prefix for Clark notation, or "" if no namespace.
+    """
+    tag = root.tag
+    if "{" in tag:
+        ns = tag[1:tag.index("}")]
+        if "tei-c.org" in ns:
+            return f"{{{ns}}}"
+    # Check children too — fragment might start with <p> but contain
+    # namespaced children
+    for el in root.iter():
+        if "{" in el.tag and "tei-c.org" in el.tag:
+            ns = el.tag[1:el.tag.index("}")]
+            return f"{{{ns}}}"
+    return ""
+
+
+def _make_tag_fn(ns_prefix: str):
+    """Return a function that builds tag names with the detected namespace."""
+    def tag(name: str) -> str:
+        return f"{ns_prefix}{name}"
+    return tag
+
 
 def _xml_id(el: etree._Element) -> Optional[str]:
     """Get the xml:id attribute of an element."""
     return el.get(f"{{{XML_NS}}}id")
+
+# Module-level tag function — set by process_tei_xml before use.
+# Default assumes TEI namespace; overridden for non-namespaced XML.
+_tag = _make_tag_fn(f"{{{TEI_NS}}}")
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +140,7 @@ def extract_lines(tree: etree._ElementTree) -> list[ExtractedLine]:
     root = tree.getroot()
 
     # Find all <lb/> elements in document order
-    all_lbs = root.iter(_tei("lb"))
+    all_lbs = root.iter(_tag("lb"))
     lb_list = [lb for lb in all_lbs if lb.get("sameAs") is None]
 
     if not lb_list:
@@ -183,10 +210,10 @@ def _extract_note_initial_lines(
     lb_set = set(id(lb) for lb in lb_list)
     result: list[ExtractedLine] = []
 
-    for note in root.iter(_tei("note")):
+    for note in root.iter(_tag("note")):
         # Find the first <lb/> inside this note
         first_lb = None
-        for child_lb in note.iter(_tei("lb")):
+        for child_lb in note.iter(_tag("lb")):
             if id(child_lb) in lb_set:
                 first_lb = child_lb
                 break
@@ -322,7 +349,7 @@ def _merge_note_initial_lines(
             # Walk up to find the note ancestor
             parent = note_el.getparent()
             while parent is not None:
-                if parent.tag == _tei("note") and id(parent) in note_to_initial:
+                if parent.tag == _tag("note") and id(parent) in note_to_initial:
                     if id(parent) not in used_notes:
                         result.append(note_to_initial[id(parent)])
                         used_notes.add(id(parent))
@@ -343,7 +370,7 @@ def _is_inside_note(el: etree._Element) -> bool:
     """Check whether an element is inside a <note>."""
     parent = el.getparent()
     while parent is not None:
-        if parent.tag == _tei("note"):
+        if parent.tag == _tag("note"):
             return True
         parent = parent.getparent()
     return False
@@ -462,7 +489,7 @@ def _walk_after(
     # If we haven't found next_lb among siblings, go up to parent
     # and continue with parent's next siblings
     parent = start.getparent()
-    if parent is not None and parent.tag != _tei("body"):
+    if parent is not None and parent.tag != _tag("body"):
         # Add parent's tail if it exists (text after </parent>)
         # Actually no — parent's tail belongs to the parent's parent context
         # We need to continue walking at the parent level
@@ -486,7 +513,7 @@ def _walk_into(
     tag = el.tag
 
     # --- Note handling ---
-    if tag == _tei("note") and not is_in_note:
+    if tag == _tag("note") and not is_in_note:
         # Record the note's position and skip its content
         current_offset = sum(len(r.text) for r in text_runs)
         parent = el.getparent()
@@ -505,10 +532,10 @@ def _walk_into(
         return
 
     # --- Existing <choice> handling ---
-    if tag == _tei("choice"):
+    if tag == _tag("choice"):
         # Use <abbr> or <sic> text (the original form)
-        abbr = el.find(_tei("abbr"))
-        sic = el.find(_tei("sic"))
+        abbr = el.find(_tag("abbr"))
+        sic = el.find(_tag("sic"))
         source_el = abbr if abbr is not None else sic
         if source_el is not None:
             # Collect text from the source branch
@@ -525,7 +552,7 @@ def _walk_into(
         return
 
     # --- Self-closing elements (lb, pb, cb, etc.) ---
-    if tag in (_tei("lb"), _tei("pb"), _tei("cb"), _tei("fw")):
+    if tag in (_tag("lb"), _tag("pb"), _tag("cb"), _tag("fw")):
         # These don't contribute text content
         if el.tail:
             text_runs.append(TextRun(
@@ -726,10 +753,10 @@ def _build_choice_element(
     """
     Build a <choice><abbr>...</abbr><expan>...</expan></choice> element.
     """
-    choice = etree.Element(_tei("choice"))
-    abbr = etree.SubElement(choice, _tei("abbr"))
+    choice = etree.Element(_tag("choice"))
+    abbr = etree.SubElement(choice, _tag("abbr"))
     abbr.text = abbr_text
-    expan = etree.SubElement(choice, _tei("expan"))
+    expan = etree.SubElement(choice, _tag("expan"))
     expan.text = expan_text
     return choice
 
@@ -917,6 +944,11 @@ def process_tei_xml(
     # Parse
     parser = etree.XMLParser(remove_blank_text=False)
     tree = etree.ElementTree(etree.fromstring(xml_string.encode("utf-8"), parser))
+
+    # Detect namespace and configure tag builder
+    global _tag
+    ns_prefix = _detect_namespace(tree.getroot())
+    _tag = _make_tag_fn(ns_prefix)
 
     # Extract lines
     lines = extract_lines(tree)
