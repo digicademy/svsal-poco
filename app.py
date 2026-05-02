@@ -526,6 +526,13 @@ def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
                 with open(output_path, encoding="utf-8") as f:
                     out_rows = [json.loads(l) for l in f if l.strip()]
 
+                # Debug: print what the pipeline produced
+                for r in out_rows[:5]:
+                    print(f"  line {r['id']}: src='{r['source_sic'][:50]}' "
+                          f"exp='{r.get('expanded_text', '???')[:50]}' "
+                          f"boundary='{r.get('predicted_nonbreaking_next_line', '')}'",
+                          flush=True)
+
                 expanded_dict = {
                     r["id"]: r.get("expanded_text", r["source_sic"])
                     for r in out_rows
@@ -729,6 +736,7 @@ with gr.Blocks(
                     )
                     xml_status = gr.Textbox(
                         label="Status",
+                        lines=3,
                         interactive=False,
                     )
 
