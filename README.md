@@ -1,6 +1,6 @@
 # School of Salamanca Post-Correction Pipeline
 
-[![DOI](https://zenodo.org/badge/1201861271.svg)](https://zenodo.org/badge/latestdoi/1201861271) [![HuggingFace](https://img.shields.io/badge/huggingface-%23FFD21E.svg?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/mpilhlt) ![MIT License](https://img.shields.io/github/license/digicademy/svsal-poco)
+<!-- [![DOI](https://zenodo.org/badge/1201861271.svg)](https://zenodo.org/badge/latestdoi/1201861271) [![HuggingFace](https://img.shields.io/badge/huggingface-%23FFD21E.svg?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/mpilhlt) ![MIT License](https://img.shields.io/github/license/digicademy/svsal-poco) -->
 
 Machine learning models for correcting early modern Spanish/Latin printed text
 from the [School of Salamanca](https://salamanca.school/) digital edition project.
@@ -51,7 +51,7 @@ svsal-poco/
 ├── train_byt5_slurm.sh        # Run ByT5 expansion model training job on HPC
 ├── upload_from_viper.sh       # Script to upload model and assets after training and
 │                              # evaluation in offline-mode HPC have completed
-└── uv.lock2                   # Dependencies and their versions for uv package mgmt
+└── uv.lock                    # Dependencies and their versions for uv package mgmt
 ```
 
 ## Data format
