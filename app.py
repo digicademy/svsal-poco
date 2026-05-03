@@ -733,8 +733,6 @@ with gr.Blocks(
                         label="Processed TEI XML",
                         lines=15,
                         interactive=False,
-                        buttons=['copy'],
-                        show_label=True,
                     )
                     xml_status = gr.Textbox(
                         label="Status",
