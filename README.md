@@ -1,54 +1,70 @@
 # School of Salamanca Post-Correction Pipeline
 
-ML models for correcting early modern Spanish/Latin printed text from the
-[School of Salamanca](https://salamanca.school/) digital edition project.
+[![DOI](https://zenodo.org/badge/1201861271.svg)](https://zenodo.org/badge/latestdoi/1201861271) [![HuggingFace](https://img.shields.io/badge/huggingface-%23FFD21E.svg?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/mpilhlt) ![MIT License](https://img.shields.io/github/license/digicademy/svsal-poco)
+
+Machine learning models for correcting early modern Spanish/Latin printed text
+from the [School of Salamanca](https://salamanca.school/) digital edition project.
 Features nonbreaking line boundary detection and abbreviation expansion using
 Canine and ByT5-base.
 
 ## Repository structure
 
 ```
-abbr-expansion/
-├── data/
-│   ├── prepare_data/          # Scripts to prepare training data from SvSal corpus
-│   │   ├── scripts/
-│   │   │   └── *              # Various scripts to transform TEI XML to jsonl
-│   │   └── runme.sh           # Commands and explanation to prepare training data
-│   ├── check_data.py          # Profile length of lines in dataset
-│   └── data_utils.py          # Shared: loading, sorting, example construction
-├── evaluation/
-│   └── evaluation.py          # Span-level CER, exact match, type breakdown
+svsal-poco/
 ├── boundary_classifier/
 │   └── boundary_classifier.py # Canine classifier: train, evaluate, infer
 ├── byt5/
-│   └── train_byt5.py          # ByT5-base: train and evaluate on HF Jobs
+│   └── train_byt5.py          # ByT5-base Seq2seq: train and evaluate
+├── data/
+│   ├── prepare_data/          # Scripts to prepare training data from SvSal corpus
+│   │   ├── scripts/
+│   │   │   └── *              # Various scripts to transform SvSal TEI XML to jsonl
+│   │   └── runme.sh           # Commands and explanation to prepare training data
+│   ├── check_data.py          # Profile dataset for length of lines
+│   └── data_utils.py          # Shared: loading, sorting, example construction
+├── evaluation/
+│   └── evaluation.py          # Span-level CER, exact match, type breakdown
 ├── infer/
 │   └── __init__.py            # Full inference pipeline (both models chained)
+├── tei/
+│   └── tei_roundtrip.py       # XML handling for inference (strip and re-inject XML)
+├── README.md                  # This file with documentation
+├── README-ByT5.md             # Model card of resulting ByT5 model (backup from HF)
+├── README-Canine.md           # Model card of resulting Canine model (backup from HF)
+├── README-dataset.md          # Dataset card of training dataset (backup from HF)
 ├── env.template               # A template for you to create your own .env file with
-│                              # secrets. Currently used only for WandB monitoring (optional)
-├── pyproject.toml             # Project metadata for uv and other python package maintenance
-└── README.md                  # This file with documentation
-├── requirements.txt
-├── test_boundary.sh             # Run smoke test for boundary classifier
+│                              # secrets.
+├── eval_byt5_slurm.sh         # Script that runs just the eval part, for resuming runs
+│                              # that have been killed (due to timeout) after training
+│                              # has completed
+├── prepare_viper.sh           # Script to download all online resources for HPC nodes
+│                              # that have no access to the net
+├── pyproject.toml             # Project metadata for uv and other package maintenance
+├── requirements.txt           # Some environments use this to handle dependencies
+│                              # (others use pyproject.toml)
+├── test_boundary.sh           # Run smoke test for boundary classifier
 ├── test_byt5.sj               # Run smoke test for byt5 abbreviation expansion model
+├── tokenize_byt5_slurm.sh     # Script to just tokenize the dataset. This is a task
+│                              # better suited to CPU nodes and can be run separately
 ├── train_boundary.sh          # Run boundary classifier training job on HuggingFace
 ├── train_byt5.sh              # Run ByT5 expansion model training job on HuggingFace
-├── uv.lock2                    # Dependencies and their versions for uv package mgmt
+├── train_byt5_slurm.sh        # Run ByT5 expansion model training job on HPC
+├── upload_from_viper.sh       # Script to upload model and assets after training and
+│                              # evaluation in offline-mode HPC have completed
+└── uv.lock2                   # Dependencies and their versions for uv package mgmt
 ```
 
 ## Data format
 
-The training data has been created by the scripts in the [data/prepare_data](./data/prepare_data/) folder. Most importantly, the [01_create_jsonl.xsl](./data/prepare_data/scripts/01_create_jsonl.xsl) and [02_adjust_shifted_lbs.py](./data/prepare_data/scripts/02_adjust_shifted_lbs.py) scripts.
+The training data has been created by the scripts in the [data/prepare_data](./data/prepare_data/) folder. Most importantly, the [01_create_jsonl.xsl](./data/prepare_data/scripts/01_create_jsonl.xsl) and [02_adjust_shifted_lbs.py](./data/prepare_data/scripts/02_adjust_shifted_lbs.py) scripts. The dataset used for our training pipeline is online
+at Hugging Face: [mpilhlt/salamanca-abbr](https://huggingface.co/datasets/mpilhlt/salamanca-abbr).
 
-Your JSONL export should have at minimum these fields per line:
+If you want to run it with your own dataset, your JSONL export should have at minimum these fields per line:
 
 ```json
 {
   "id":                    "W0011-00-0006-lb-2027",
   "doc_id":                "W0011",
-  "facs_id":               "W0011-0006",
-  "ancestor_id":           "W0011-00-0006-pa-03f6",
-  "lang":                  ["la"],
   "source_sic":            "lib. Lex est communis ciuitatis ⦃cōsensus⦄ qui",
   "target_corr":           "lib. Lex est communis ciuitatis consensus qui",
   "contains_abbr":         "true",
@@ -66,14 +82,6 @@ training signal for ByT5). The `nonbreaking_next_line` field is used by
 both the boundary classifier (as positive labels) and ByT5 preprocessing
 (for line pair concatenation).
 
-## Setup
-
-```bash
-pip install -r requirements.txt
-# or with uv:
-uv sync
-```
-
 ## Training on HuggingFace Jobs
 
 ### Boundary classifier (Canine)
@@ -89,7 +97,7 @@ This job will do the following on HuggingFace infrastructure:
 - Upload `boundary_eval.json`, `best_model.pt`, and `threshold.json`
   to `mpilhlt/canine-salamanca-boundary-classifier`
 
-### ByT5 abbreviation expansion
+### Abbreviation expansion (ByT5)
 
 ```bash
 ./train_byt5.sh
@@ -98,12 +106,56 @@ This job will do the following on HuggingFace infrastructure:
 This job will do the following on HuggingFace infrastructure:
 - Train for up to 10 epochs with early stopping (patience 3)
 - Select best checkpoint by span CER on the validation set
-- Push each checkpoint to Hub as it is saved (`hub_strategy="every_save"`)
-- Upload `test_breakdown.json` with per-abbreviation-type analysis
+- Push each checkpoint to Hub as it is saved
+- Upload final model, test results and `test_breakdown.json`
+  with per-abbreviation-type analysis
+
+## Training on Slurm-based HPC
+
+There are several scripts tailored to Slurm-based environments
+(in our case, the HPC cluster was called *"viper"*, hence the
+name appears in several places):
+We have used this for the abbreviation expansion (ByT5) model
+only, so if you want to train the boundary classifier, you'll
+have to adjust the scripts as needed.
+
+1. `./prepare_viper.sh`: As our HPC nodes have no access to the
+   internat and cannot download dataset or models, nor install
+   python packages from PyPI, this script downloads all such
+   resources to the login node before you launch the Slurm job
+   on the compute node.
+2. `././tokenize_byt5_slurm.sh`: The loading, splitting and
+   tokenizing of the dataset is a compute-intensive task that
+   is better suited to a CPU node than to a GPU one. Therefore,
+   we have broken out these steps to a separate preprocessing
+   step creating `tokenized_cache` data that the main training
+   script can resume from.
+3. `./train_byt5_slurm.sh`: This is the main training script. It
+   can resume from the tokenizing cache or from checkpoints
+   saved in earlier runs. Checkpoints are saved after each
+   epoch. This should enable the script to just be repeatedly
+   run when the walltime for the job expires and the job is
+   being killed.
+4. `././eval_byt5_slurm.sh`: If the training job is killed when the
+   training has actually completed (i.e. during test set
+   evaluation), this script makes the process resume with just
+   the evaluation.
+5. `./upload_from_viper.sh`: Once all is finished, this script
+   uploads model and evaluation results to HuggingFace and
+   optionally syncs with your weights and bits repository for
+   analytics.
 
 ## Inference on new texts
 
+### Local python
+
 ```bash
+# Setup
+pip install -r requirements.txt
+# or with uv:
+uv sync
+
+# Download models
 huggingface-cli download mpilhlt/byt5-salamanca-abbr \
   --repo-type model \
   --local-dir ./byt5-salamanca-abbr
@@ -112,6 +164,7 @@ huggingface-cli download mpilhlt/canine-salamanca-boundary-classifier \
   --repo-type model \
   --local-dir ./canine-salamanca-boundary-classifier
 
+# Run inference
 python -m infer \
   --input              new_texts.jsonl \
   --output             expanded.jsonl \
@@ -123,11 +176,20 @@ python -m infer \
 If the package is installed, you can run the last command also directly
 with the `infer` command.
 
-Input JSONL needs: `id`, `doc_id`, `source_sic`, `lang`. No abbreviation
+Input JSONL needs: `id`, `doc_id`, `source_sic`. No abbreviation
 markup is expected — the pipeline handles detection via the boundary
 classifier and ByT5's learned span associations.
 
 Output JSONL adds an `expanded_text` field to each input row.
+
+### (Hugging Face) Gradio Space
+
+This repository's [`space` branch](https://github.com/digicademy/svsal-poco/tree/space)
+has a gradio web application that can drive, e.g. a
+[Hugging Face Space](https://huggingface.co/spaces).
+
+It offers forms for running the combined pipeline in both plaintext and
+XML processing mode as well as a standalone boundary detection demo tab.
 
 ## Training decisions and rationale
 
@@ -141,11 +203,6 @@ Abbreviations are full tokens wrapped in ⦃⦄ delimiters. ByT5 sees these
 as distinct bytes and learns to replace marked spans while copying the rest.
 This aligns with ByT5's pretraining objective and gives the clearest
 learning signal.
-
-**Why span CER for model selection, not full-line CER?**
-Full-line CER rewards correct copying of non-abbreviated text, which the
-model learns trivially. Span CER focuses checkpoint selection on the
-quality of expansions — the actual task.
 
 **Why high-precision threshold for the boundary classifier?**
 False positives (spuriously concatenating lines) corrupt the ByT5 input
@@ -161,8 +218,6 @@ task), uses local attention to downsample before the main transformer
 the binary classification framing. ByT5 would require generative framing
 for a classification task, which is unnecessarily complex here.
 
-## What is not yet implemented
+## License
 
-- Canine-based abbreviation expansion (encoder + character decoder head):
-  implement after establishing ByT5-base results as a baseline
-- Multi-GPU training support for span metrics in compute_metrics callback
+The code of the present repository is published under the [MIT license](./LICENSE).
