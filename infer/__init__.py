@@ -8,7 +8,7 @@
 #   2. Runs the boundary classifier to identify nonbreaking line pairs
 #   3. Builds sliding windows of lines (matching training format)
 #   4. Runs ByT5 to expand abbreviations
-#   5. Splits output on ↵ to restore line structure, keeping only
+#   5. Splits output on ↵/¬ to restore line structure, keeping only
 #      "owned" lines from each window
 #   6. Writes a JSONL output file with expanded text per line
 
