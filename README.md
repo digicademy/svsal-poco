@@ -147,15 +147,20 @@ have to adjust the scripts as needed.
 
 ## Inference on new texts
 
-### Local python
+### Local inference
+
+#### Setup
+
+Install dependencies
 
 ```bash
-# Setup
 pip install -r requirements.txt
-# or with uv:
-uv sync
+# or: uv sync
+```
 
-# Download models
+Download models locally
+
+```bash
 huggingface-cli download mpilhlt/byt5-salamanca-abbr \
   --repo-type model \
   --local-dir ./byt5-salamanca-abbr
@@ -163,8 +168,13 @@ huggingface-cli download mpilhlt/byt5-salamanca-abbr \
 huggingface-cli download mpilhlt/canine-salamanca-boundary-classifier \
   --repo-type model \
   --local-dir ./canine-salamanca-boundary-classifier
+```
 
-# Run inference
+#### Standard inferencing
+
+Run the standard inference like this:
+
+```bash
 python -m infer \
   --input              new_texts.jsonl \
   --output             expanded.jsonl \
@@ -181,6 +191,55 @@ markup is expected — the pipeline handles detection via the boundary
 classifier and ByT5's learned span associations.
 
 Output JSONL adds an `expanded_text` field to each input row.
+
+#### Convenience wrappers
+
+Besides `python -m infer` (JSONL input), this repo also supports local wrappers that offer more convenient workflows:
+
+- `infer_handler.py`: Python CLI for `text`, `jsonl`, and `xml` modes
+- `infer_local.sh`: file-to-file wrapper for single inputs
+- `infer_local_batch.sh`: recursive directory batch processing
+
+Notes:
+- `text` mode: one input line per line; output includes `¬` for predicted nonbreaking boundaries.
+- `xml` mode: runs TEI/XML roundtripping and writes processed XML.
+- `jsonl` mode: preserves "standard" JSONL pipeline behavior.
+
+**Single files**
+
+```bash
+./infer_local.sh \
+  --mode <text|jsonl|xml> \
+  --input <input-file> \
+  --output <output-file> \
+  --boundary-model-dir ./canine-salamanca-boundary-classifier \
+  --byt5-model-dir ./byt5-salamanca-abbr
+```
+
+Examples:
+
+```bash
+# plaintext -> expanded plaintext
+./infer_local.sh --mode text --input in.txt --output out.txt \
+  --boundary-model-dir ./canine-salamanca-boundary-classifier \
+  --byt5-model-dir ./byt5-salamanca-abbr
+
+# XML -> processed XML
+./infer_local.sh --mode xml --input in.xml --output out.xml \
+  --boundary-model-dir ./canine-salamanca-boundary-classifier \
+  --byt5-model-dir ./byt5-salamanca-abbr
+```
+
+**Batch usage (directories)**
+
+```bash
+./infer_local_batch.sh \
+  --mode <text|xml|jsonl> \
+  --input-dir <input-dir> \
+  --output-dir <output-dir> \
+  --boundary-model-dir ./canine-salamanca-boundary-classifier \
+  --byt5-model-dir ./byt5-salamanca-abbr
+```
 
 ### (Hugging Face) Gradio Space
 
