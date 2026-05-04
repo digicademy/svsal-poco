@@ -161,11 +161,11 @@ pip install -r requirements.txt
 Download models locally
 
 ```bash
-huggingface-cli download mpilhlt/byt5-salamanca-abbr \
+hf download mpilhlt/byt5-salamanca-abbr \
   --repo-type model \
   --local-dir ./byt5-salamanca-abbr
 
-huggingface-cli download mpilhlt/canine-salamanca-boundary-classifier \
+hf download mpilhlt/canine-salamanca-boundary-classifier \
   --repo-type model \
   --local-dir ./canine-salamanca-boundary-classifier
 ```
