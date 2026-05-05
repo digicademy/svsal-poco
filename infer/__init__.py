@@ -212,6 +212,7 @@ def run_pipeline(
     context_chars:       int   = 40,
     context_lines:       int   = 2,
     # Pre-loaded objects — skip loading when provided
+    pre_annotated_boundaries: dict = None,
     boundary_model:      BoundaryClassifier         | None = None,
     boundary_tokenizer:  CanineTokenizer            | None = None,
     byt5_model:          T5ForConditionalGeneration | None = None,
@@ -227,6 +228,8 @@ def run_pipeline(
     byt5_model_dir:     HF model directory or Hub repo id for ByT5
     lexicon_data_path:  optional path to training JSONL for lexicon construction
     context_lines:      number of context lines on each side of owned lines
+    pre_annotated_boundaries: optional dict mapping line id to predicted nonbreaking next line id,
+                        to inject known boundary classification information.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -286,6 +289,14 @@ def run_pipeline(
         threshold=boundary_threshold,
         context_chars=context_chars,
     )
+
+    # --- Stage 1b: override with pre-annotated boundaries ---
+    if pre_annotated_boundaries:
+        for row in lines_with_boundaries:
+            if row["id"] in pre_annotated_boundaries:
+                row["predicted_nonbreaking_next_line"] = (
+                    pre_annotated_boundaries[row["id"]]
+                )
 
     # --- Stage 2: build sliding windows ---
     print("Building nonbreaking chains...")

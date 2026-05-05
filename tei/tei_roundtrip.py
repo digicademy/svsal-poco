@@ -122,9 +122,9 @@ class ExtractedLine:
 # Line extraction
 # ---------------------------------------------------------------------------
 
-def extract_lines(tree: etree._ElementTree) -> list[ExtractedLine]:
+def extract_lines(tree: etree._ElementTree) -> tuple[list[ExtractedLine], dict[str, str]]:
     """
-    Extract all lines from a TEI XML tree.
+    Extract all lines and pre-annotated boundaries from a TEI XML tree.
 
     Walks the tree to find all <lb/> elements. For each lb, collects
     the text content between it and the next lb, handling:
@@ -133,11 +133,12 @@ def extract_lines(tree: etree._ElementTree) -> list[ExtractedLine]:
     - Existing <choice> elements: their <abbr> text is used as source
     - Note-initial text: text inside a <note> before its first <lb/>
 
-    Returns a flat list of ExtractedLine objects. Main-text lines and
-    note lines are interleaved in document order, distinguished by
-    is_in_note.
+    Returns a tuple of a flat list of ExtractedLine objects and
+    pre_annotated boundaries. Main-text lines and note lines are
+    interleaved in document order, distinguished by is_in_note.
     """
     root = tree.getroot()
+    pre_annotated = {}
 
     # Find all <lb/> elements in document order
     all_lbs = root.iter(_tag("lb"))
@@ -157,6 +158,13 @@ def extract_lines(tree: etree._ElementTree) -> list[ExtractedLine]:
         next_lb = lb_list[i + 1] if i + 1 < len(lb_list) else None
         is_in_note = _is_inside_note(lb)
         line_id = _xml_id(lb) or f"__lb_{i}"
+
+        # Record pre-annotated boundary if this lb is known to be nonbreaking.
+        if lb.get("break") == "no":
+            next_lb = lb_list[i + 1] if i + 1 < len(lb_list) else None
+            if next_lb is not None:
+                next_id = _xml_id(next_lb) or f"__lb_{i+1}"
+                pre_annotated[line_id] = next_id
 
         # Collect text runs between this lb and the next
         text_runs: list[TextRun] = []
@@ -951,7 +959,7 @@ def process_tei_xml(
     _tag = _make_tag_fn(ns_prefix)
 
     # Extract lines
-    lines = extract_lines(tree)
+    lines, pre_annotated = extract_lines(tree)
 
     if not lines:
         return xml_string
@@ -967,7 +975,9 @@ def process_tei_xml(
         })
 
     # Run pipeline
-    expanded_dict, boundary_dict = run_pipeline_fn(pipeline_rows)
+    expanded_dict, boundary_dict = run_pipeline_fn(
+        pipeline_rows, pre_annotated
+    )
 
     # Apply results
     apply_expansions(tree, lines, expanded_dict, boundary_dict)

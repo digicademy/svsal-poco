@@ -93,27 +93,41 @@ def write_output(s: str, output_file: str | None):
         sys.stdout.write(s)
 
 
-def plaintext_to_rows(text: str):
+def plaintext_to_rows(text: str) -> tuple[list[dict], dict[str, str]]:
+    """Returns (rows, pre_annotated_boundaries)."""
     rows = []
-    for i, line in enumerate(text.strip().splitlines()):
+    pre_annotated = {}
+    raw_lines = text.strip().splitlines()
+
+    for i, line in enumerate(raw_lines):
         line = line.strip()
         if not line:
             continue
+        line_id = f"demo-00-0001-lb-{i:04d}"
+        is_nonbreaking = line.endswith(NONBREAKING_MARKER)
+        clean_line = line.rstrip(NONBREAKING_MARKER) if is_nonbreaking else line
+
         rows.append({
-            "id": f"demo-00-0001-lb-{i:04d}",
+            "id": line_id,
             "doc_id": "demo",
             "facs_id": "demo-0001",
             "ancestor_id": "demo-00-0001-pa-0001",
             "lang": ["la"],
-            "source_sic": line,
-            "target_corr": line,
+            "source_sic": clean_line,
+            "target_corr": clean_line,
             "contains_abbr": "false",
             "nonbreaking_next_line": "",
         })
-    return rows
+
+        if is_nonbreaking and i + 1 < len(raw_lines):
+            next_id = f"demo-00-0001-lb-{i+1:04d}"
+            pre_annotated[line_id] = next_id
+
+    return rows, pre_annotated
 
 
-def run_pipeline_on_rows(rows, output_format, models, batch_size=16, lang_prefix=False):
+def run_pipeline_on_rows(rows, output_format, models, batch_size=16,
+                         lang_prefix=False, pre_annotated_boundaries=None):
     boundary_model, boundary_tokenizer, boundary_threshold, byt5_model, byt5_tokenizer = models
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
@@ -132,6 +146,7 @@ def run_pipeline_on_rows(rows, output_format, models, batch_size=16, lang_prefix
             boundary_threshold=boundary_threshold,
             byt5_model=byt5_model,
             byt5_tokenizer=byt5_tokenizer,
+            pre_annotated_boundaries=pre_annotated_boundaries,
             batch_size=batch_size,
             lang_prefix=lang_prefix,
         )
@@ -169,7 +184,7 @@ def run_pipeline_on_rows(rows, output_format, models, batch_size=16, lang_prefix
 def run_xml(xml_text, models, batch_size=16):
     boundary_model, boundary_tokenizer, boundary_threshold, byt5_model, byt5_tokenizer = models
 
-    def pipeline_fn(line_rows):
+    def pipeline_fn(line_rows, pre_annotated=None):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as tmp:
             input_path = tmp.name
             for row in line_rows:
@@ -185,6 +200,7 @@ def run_xml(xml_text, models, batch_size=16):
                 boundary_threshold=boundary_threshold,
                 byt5_model=byt5_model,
                 byt5_tokenizer=byt5_tokenizer,
+                pre_annotated_boundaries=pre_annotated,
                 batch_size=batch_size,
             )
 
@@ -262,13 +278,14 @@ def main():
                 os.unlink(output_path)
 
     elif args.mode == "text":
-        rows = plaintext_to_rows(raw)
+        rows, pre_annotated = plaintext_to_rows(raw)
         out = run_pipeline_on_rows(
             rows,
             output_format=args.text_output,
             models=models,
             batch_size=args.batch_size,
             lang_prefix=args.lang_prefix,
+            pre_annotated_boundaries=pre_annotated,
         )
         write_output(out, args.output_file)
 

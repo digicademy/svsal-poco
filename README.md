@@ -37,6 +37,9 @@ svsal-poco/
 ├── eval_byt5_slurm.sh         # Script that runs just the eval part, for resuming runs
 │                              # that have been killed (due to timeout) after training
 │                              # has completed
+├── infer_handler.py           # Python CLI for `text`, `jsonl`, and `xml` modes
+├── infer_local.sh             # File-to-file wrapper for single inputs
+├── infer_local_batch.sh       # Recursive directory batch processing
 ├── prepare_viper.sh           # Script to download all online resources for HPC nodes
 │                              # that have no access to the net
 ├── pyproject.toml             # Project metadata for uv and other package maintenance
@@ -201,7 +204,7 @@ Besides `python -m infer` (JSONL input), this repo also supports local wrappers 
 - `infer_local_batch.sh`: recursive directory batch processing
 
 Notes:
-- `text` mode: one input line per line; output includes `¬` for predicted nonbreaking boundaries.
+- `text` mode: one input line per line; output includes `¬` for predicted nonbreaking boundaries (and assumes `¬` in the *input* represents nonbreaking boundaries that have been established reliably otherwise).
 - `xml` mode: runs TEI/XML roundtripping and writes processed XML.
 - `jsonl` mode: preserves "standard" JSONL pipeline behavior.
 
