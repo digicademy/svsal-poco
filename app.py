@@ -507,7 +507,7 @@ def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
         return "", f"Models not loaded: {_load_error}"
 
     try:
-        def pipeline_fn(line_rows):
+        def pipeline_fn(line_rows, pre_annotated=None):
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
             ) as tmp:
@@ -526,6 +526,7 @@ def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
                     boundary_threshold=boundary_threshold,
                     byt5_model=byt5_model,
                     byt5_tokenizer=byt5_tokenizer,
+                    pre_annotated_boundaries=pre_annotated,
                     batch_size=16,
                 )
 
