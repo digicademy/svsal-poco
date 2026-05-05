@@ -303,30 +303,36 @@ load_models()
 # Core processing helpers
 # ---------------------------------------------------------------------------
 
-def lines_to_jsonl_rows(text: str) -> list[dict]:
+def lines_to_jsonl_rows(text: str) -> tuple[list[dict], dict[str, str]]:
     """
-    Convert plain text (one line per newline) into minimal row dicts
-    compatible with the pipeline. Assigns synthetic ids and a single
-    doc_id so document-level logic works correctly.
+    Convert plain text to JSONL rows for the pipeline.
+    Returns (rows, pre_annotated_boundaries).
+    
+    Lines ending with ¬ are treated as known nonbreaking boundaries.
+    The marker is stripped from the text.
     """
+    raw_lines = text.split("\n")
     rows = []
-    for i, line in enumerate(text.strip().splitlines()):
-        line = line.strip()
-        if not line:
-            continue
+    pre_annotated = {}
+
+    for i, line in enumerate(raw_lines):
+        line_id = f"demo-00-0001-lb-{i:04d}"
+        is_nonbreaking = line.endswith(NONBREAKING_MARKER)
+        clean_line = line.rstrip(NONBREAKING_MARKER) if is_nonbreaking else line
+
         rows.append({
-            "id":                    f"demo-00-0001-lb-{i:04d}",
-            "doc_id":               "demo",
-            "facs_id":              "demo-0001",
-            "ancestor_id":          "demo-00-0001-pa-0001",
-            "lang":                 ["la"],
-            "source_sic":           line,
-            "target_corr":          line,   # placeholder; overwritten by model
-            "contains_abbr":        "false",
+            "id": line_id,
+            "doc_id": "demo",
+            "source_sic": clean_line,
+            "lang": ["la"],
             "nonbreaking_next_line": "",
         })
-    return rows
 
+        if is_nonbreaking and i + 1 < len(raw_lines):
+            next_id = f"demo-00-0001-lb-{i+1:04d}"
+            pre_annotated[line_id] = next_id
+
+    return rows, pre_annotated
 
 def classify_boundaries_only(text: str) -> str:
     """
@@ -354,7 +360,6 @@ def classify_boundaries_only(text: str) -> str:
             output_lines.append(line)
     return "\n".join(output_lines)
 
-
 def expand_text(text: str) -> tuple[str, str, str]:
     """
     Run the full pipeline (boundary detection + abbreviation expansion)
@@ -365,7 +370,7 @@ def expand_text(text: str) -> tuple[str, str, str]:
         boundaries: boundary detection annotation only
         diff:       side-by-side original vs expanded for changed lines
     """
-    rows = lines_to_jsonl_rows(text)
+    rows, pre_annotated = lines_to_jsonl_rows(text)
 
     # Write to temp file for run_pipeline
     with tempfile.NamedTemporaryFile(
@@ -384,6 +389,7 @@ def expand_text(text: str) -> tuple[str, str, str]:
             boundary_model=boundary_model,
             boundary_tokenizer=boundary_tokenizer,
             boundary_threshold=boundary_threshold,
+            pre_annotated_boundaries=pre_annotated,
             byt5_model=byt5_model,
             byt5_tokenizer=byt5_tokenizer,
             batch_size=16,
