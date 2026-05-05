@@ -2,6 +2,8 @@
 __pycache__/
 test-output/
 test-output-byt5/
+byt5-salamanca-abbr/
+canine-salamanca-boundary-classifier/
 .env
 *.pyc
 *.pt
