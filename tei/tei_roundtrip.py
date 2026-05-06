@@ -84,7 +84,7 @@ class TextRun:
     is_tail:      bool               # True = node.tail; False = node.text
     plain_start:  int = 0            # offset in the stitched plain text
     plain_end:    int = 0
-
+    from_choice:  bool = False
 
 @dataclass
 class NoteInfo:
@@ -204,7 +204,7 @@ def extract_lines(tree: etree._ElementTree) -> tuple[list[ExtractedLine], dict[s
     # inside that note.
     lines = _merge_note_initial_lines(lb_lines, note_initial_lines, lb_list)
 
-    return lines
+    return lines, pre_annotated
 
 
 def _extract_note_initial_lines(
@@ -551,6 +551,7 @@ def _walk_into(
             if source_text:
                 text_runs.append(TextRun(
                     text=source_text, node=el, is_tail=False,
+                    from_choice=True,
                 ))
         # Tail text after </choice>
         if el.tail:
@@ -614,10 +615,13 @@ def apply_expansions(
     Returns the modified tree (modified in-place).
     """
     # --- Apply boundary predictions ---
+    line_by_id = {line.line_id: line for line in lines}
     for line in lines:
         if line.line_id in boundary_predictions:
-            lb = line.lb_element
-            lb.set("break", "no")
+            next_line_id = boundary_predictions[line.line_id]
+            next_line = line_by_id.get(next_line_id)
+            if next_line is not None:
+                next_line.lb_element.set("break", "no")
 
     # --- Apply expansions ---
     for line in lines:
@@ -664,6 +668,10 @@ def _apply_line_expansion(
             r for r in line.text_runs
             if r.plain_end > orig_start and r.plain_start < orig_end
         ]
+
+        # Skip if all affected runs are from existing <choice> elements
+        if all(r.from_choice for r in affected_runs):
+            continue
 
         if not affected_runs:
             continue

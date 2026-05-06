@@ -15,6 +15,7 @@ dependencies = [
     "codecarbon>=2.3.0",
     "sentencepiece",
     "lxml>=6.1.0",
+    "flair>=0.15.1",
 ]
 
 [build-system]

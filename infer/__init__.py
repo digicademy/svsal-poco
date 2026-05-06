@@ -21,6 +21,7 @@ from collections import defaultdict
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 
 from data.data_utils import load_and_sort_lines, CorpusLexicon, ABBR_OPEN, ABBR_CLOSE, LINE_BREAK, LINE_SEP
+from boundary_detector import BoundaryDetector, create_boundary_detector
 from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_boundaries
 
 
@@ -217,6 +218,8 @@ def run_pipeline(
     boundary_tokenizer:  CanineTokenizer            | None = None,
     byt5_model:          T5ForConditionalGeneration | None = None,
     byt5_tokenizer:      AutoTokenizer              | None = None,
+    # New: boundary detector interface
+    boundary_detector:   BoundaryDetector           | None = None,
 ):
     """
     Full inference pipeline for unseen texts.
@@ -230,41 +233,60 @@ def run_pipeline(
     context_lines:      number of context lines on each side of owned lines
     pre_annotated_boundaries: optional dict mapping line id to predicted nonbreaking next line id,
                         to inject known boundary classification information.
+    boundary_detector:  Optional pre-loaded BoundaryDetector instance. If provided,
+                        boundary_model and boundary_tokenizer are ignored.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Load boundary classifier (only if not provided) ---
-    if boundary_model is None:
-        if boundary_model_dir is None:
-            raise ValueError("Provide boundary_model or boundary_model_dir")
-        print("Loading boundary classifier...")
-        boundary_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
-        boundary_model = BoundaryClassifier(
-            use_lexicon=(lexicon_data_path is not None),
-        )
-        boundary_model.load_state_dict(
-            torch.load(f"{boundary_model_dir}/best_model.pt",
-                        map_location=device)
-        )
-        print(f"Boundary model loaded from {boundary_model_dir}")
-
-    if boundary_threshold is None:
-        if boundary_model_dir:
-            threshold_path = Path(boundary_model_dir) / "threshold.json"
-            if threshold_path.exists():
-                boundary_threshold = json.loads(
-                    threshold_path.read_text()
-                )["threshold"]
+    # --- Load boundary detector (new interface) ---
+    if boundary_detector is not None:
+        # Use the provided detector
+        print(f"Using pre-loaded boundary detector")
         if boundary_threshold is None:
-            boundary_threshold = 0.6
-            print(f"No threshold found; using default {boundary_threshold}")
-    print(f"Boundary threshold: {boundary_threshold}")
+            boundary_threshold = boundary_detector.get_default_threshold()
+        print(f"Boundary threshold: {boundary_threshold}")
+        
+        # Optional lexicon
+        lexicon = None
+        if lexicon_data_path:
+            lexicon = CorpusLexicon()
+            lexicon.build_from_jsonl(lexicon_data_path)
+            # Set lexicon on detector if it supports it
+            if hasattr(boundary_detector, 'set_lexicon'):
+                boundary_detector.set_lexicon(lexicon)
+    else:
+        # --- Load boundary classifier (legacy interface, for backward compatibility) ---
+        if boundary_model is None:
+            if boundary_model_dir is None:
+                raise ValueError("Provide boundary_detector, boundary_model, or boundary_model_dir")
+            print("Loading boundary classifier...")
+            boundary_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
+            boundary_model = BoundaryClassifier(
+                use_lexicon=(lexicon_data_path is not None),
+            )
+            boundary_model.load_state_dict(
+                torch.load(f"{boundary_model_dir}/best_model.pt",
+                            map_location=device)
+            )
+            print(f"Boundary model loaded from {boundary_model_dir}")
 
-    # Optional lexicon
-    lexicon = None
-    if lexicon_data_path:
-        lexicon = CorpusLexicon()
-        lexicon.build_from_jsonl(lexicon_data_path)
+        if boundary_threshold is None:
+            if boundary_model_dir:
+                threshold_path = Path(boundary_model_dir) / "threshold.json"
+                if threshold_path.exists():
+                    boundary_threshold = json.loads(
+                        threshold_path.read_text()
+                    )["threshold"]
+            if boundary_threshold is None:
+                boundary_threshold = 0.6
+                print(f"No threshold found; using default {boundary_threshold}")
+        print(f"Boundary threshold: {boundary_threshold}")
+
+        # Optional lexicon
+        lexicon = None
+        if lexicon_data_path:
+            lexicon = CorpusLexicon()
+            lexicon.build_from_jsonl(lexicon_data_path)
 
     # --- Load ByT5 (only if not provided) ---
     if byt5_model is None:
@@ -281,14 +303,23 @@ def run_pipeline(
 
     # --- Stage 1: boundary classification ---
     print("Running boundary classifier...")
-    lines_with_boundaries = predict_boundaries(
-        lines=lines,
-        model=boundary_model,
-        tokenizer=boundary_tokenizer,
-        lexicon=lexicon,
-        threshold=boundary_threshold,
-        context_chars=context_chars,
-    )
+    if boundary_detector is not None:
+        # Use new detector interface
+        lines_with_boundaries = boundary_detector.predict_boundaries(
+            lines=lines,
+            threshold=boundary_threshold,
+            context_chars=context_chars,
+        )
+    else:
+        # Use legacy interface
+        lines_with_boundaries = predict_boundaries(
+            lines=lines,
+            model=boundary_model,
+            tokenizer=boundary_tokenizer,
+            lexicon=lexicon,
+            threshold=boundary_threshold,
+            context_chars=context_chars,
+        )
 
     # --- Stage 1b: override with pre-annotated boundaries ---
     if pre_annotated_boundaries:

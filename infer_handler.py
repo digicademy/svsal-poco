@@ -47,25 +47,48 @@ from tei.tei_roundtrip import process_tei_xml
 NONBREAKING_MARKER = "¬"
 
 
-def load_models(boundary_model_dir: str, byt5_model_dir: str):
-    # Boundary model
-    boundary_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
-    boundary_model = BoundaryClassifier(use_lexicon=False)
-
-    weights_path = os.path.join(boundary_model_dir, "best_model.pt")
-    threshold_path = os.path.join(boundary_model_dir, "threshold.json")
-
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"Missing boundary weights: {weights_path}")
-    if not os.path.exists(threshold_path):
-        raise FileNotFoundError(f"Missing boundary threshold: {threshold_path}")
-
-    boundary_model.load_state_dict(
-        torch.load(weights_path, map_location="cpu", weights_only=True)
-    )
-    boundary_model.eval()
-
-    boundary_threshold = json.loads(Path(threshold_path).read_text(encoding="utf-8"))["threshold"]
+def load_models(
+    boundary_model_dir: str | None = None,
+    byt5_model_dir: str = "",
+    boundary_model_type: str = "canine",
+    boundary_model_name: str | None = None,
+):
+    """
+    Load models for inference.
+    
+    Args:
+        boundary_model_dir: Directory with best_model.pt (for canine) or HF model identifier
+        byt5_model_dir: Directory or HF path for ByT5 model
+        boundary_model_type: Type of boundary detector ('canine' or 'flair')
+        boundary_model_name: HF model name (alias for boundary_model_dir)
+        
+    Returns:
+        Tuple of (boundary_detector, boundary_threshold, byt5_model, byt5_tokenizer)
+    """
+    from boundary_detector import create_boundary_detector
+    
+    # Load boundary detector
+    if boundary_model_type == "canine":
+        # Use boundary_model_dir or boundary_model_name (both work for canine)
+        model_path = boundary_model_dir or boundary_model_name
+        if not model_path:
+            raise ValueError("boundary_model_dir or boundary_model_name is required for canine detector")
+        boundary_detector = create_boundary_detector(
+            model_type="canine",
+            model_path=model_path,
+            use_lexicon=False,
+        )
+        boundary_threshold = boundary_detector.get_default_threshold()
+    elif boundary_model_type == "flair":
+        # Use boundary_model_name or boundary_model_dir (both work for flair)
+        model_name = boundary_model_name or (boundary_model_dir + "/pytorch_model.bin" if boundary_model_dir else None)
+        boundary_detector = create_boundary_detector(
+            model_type="flair",
+            model_name=model_name or "mschonhardt/latin-contextual-lb-detector",
+        )
+        boundary_threshold = boundary_detector.get_default_threshold()
+    else:
+        raise ValueError(f"Unknown boundary_model_type: {boundary_model_type}")
 
     # ByT5 model (same tokenizer choice as app.py)
     byt5_tokenizer = AutoTokenizer.from_pretrained("google/byt5-base")
@@ -75,7 +98,7 @@ def load_models(boundary_model_dir: str, byt5_model_dir: str):
     )
     byt5_model.eval()
 
-    return boundary_model, boundary_tokenizer, boundary_threshold, byt5_model, byt5_tokenizer
+    return boundary_detector, boundary_threshold, byt5_model, byt5_tokenizer
 
 
 def read_input(args) -> str:
@@ -128,7 +151,7 @@ def plaintext_to_rows(text: str) -> tuple[list[dict], dict[str, str]]:
 
 def run_pipeline_on_rows(rows, output_format, models, batch_size=16,
                          lang_prefix=False, pre_annotated_boundaries=None):
-    boundary_model, boundary_tokenizer, boundary_threshold, byt5_model, byt5_tokenizer = models
+    boundary_detector, boundary_threshold, byt5_model, byt5_tokenizer = models
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         input_path = f.name
@@ -141,8 +164,7 @@ def run_pipeline_on_rows(rows, output_format, models, batch_size=16,
         run_pipeline(
             input_path=input_path,
             output_path=output_path,
-            boundary_model=boundary_model,
-            boundary_tokenizer=boundary_tokenizer,
+            boundary_detector=boundary_detector,
             boundary_threshold=boundary_threshold,
             byt5_model=byt5_model,
             byt5_tokenizer=byt5_tokenizer,
@@ -182,7 +204,7 @@ def run_pipeline_on_rows(rows, output_format, models, batch_size=16,
 
 
 def run_xml(xml_text, models, batch_size=16):
-    boundary_model, boundary_tokenizer, boundary_threshold, byt5_model, byt5_tokenizer = models
+    boundary_detector, boundary_threshold, byt5_model, byt5_tokenizer = models
 
     def pipeline_fn(line_rows, pre_annotated=None):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as tmp:
@@ -195,8 +217,7 @@ def run_xml(xml_text, models, batch_size=16):
             run_pipeline(
                 input_path=input_path,
                 output_path=output_path,
-                boundary_model=boundary_model,
-                boundary_tokenizer=boundary_tokenizer,
+                boundary_detector=boundary_detector,
                 boundary_threshold=boundary_threshold,
                 byt5_model=byt5_model,
                 byt5_tokenizer=byt5_tokenizer,
@@ -232,7 +253,10 @@ def main():
     parser.add_argument("--stdin", action="store_true", help="Read input from stdin")
     parser.add_argument("--input-file", help="Path to input file")
     parser.add_argument("--output-file", help="Path to output file (defaults to stdout)")
-    parser.add_argument("--boundary-model-dir", required=True, help="Dir with best_model.pt and threshold.json")
+    parser.add_argument("--boundary-model-dir", help="Dir with best_model.pt and threshold.json (for canine)")
+    parser.add_argument("--boundary-model-type", choices=["canine", "flair"], default="canine",
+                        help="Type of boundary detector (default: canine)")
+    parser.add_argument("--boundary-model-name", help="HF model name for flair detector")
     parser.add_argument("--byt5-model-dir", required=True, help="Dir/loadable HF path for ByT5 model")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lang-prefix", action="store_true", default=False)
@@ -247,8 +271,23 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate boundary model arguments
+    # Both --boundary-model-dir and --boundary-model-name work for both model types
+    if args.boundary_model_type == "canine":
+        if not args.boundary_model_dir and not args.boundary_model_name:
+            parser.error("--boundary-model-dir or --boundary-model-name is required for canine detector")
+    elif args.boundary_model_type == "flair":
+        if not args.boundary_model_dir and not args.boundary_model_name:
+            # Use default for flair if neither is specified
+            args.boundary_model_name = "mschonhardt/latin-contextual-lb-detector"
+
     raw = read_input(args)
-    models = load_models(args.boundary_model_dir, args.byt5_model_dir)
+    models = load_models(
+        args.boundary_model_dir,
+        args.byt5_model_dir,
+        args.boundary_model_type,
+        args.boundary_model_name,
+    )
 
     if args.mode == "jsonl":
         # passthrough: run pipeline directly on provided JSONL
@@ -257,12 +296,11 @@ def main():
             input_path = f.name
         output_path = input_path.replace(".jsonl", "_out.jsonl")
         try:
-            boundary_model, boundary_tokenizer, boundary_threshold, byt5_model, byt5_tokenizer = models
+            boundary_detector, boundary_threshold, byt5_model, byt5_tokenizer = models
             run_pipeline(
                 input_path=input_path,
                 output_path=output_path,
-                boundary_model=boundary_model,
-                boundary_tokenizer=boundary_tokenizer,
+                boundary_detector=boundary_detector,
                 boundary_threshold=boundary_threshold,
                 byt5_model=byt5_model,
                 byt5_tokenizer=byt5_tokenizer,

@@ -35,14 +35,18 @@ def parse_line_id(line_id: str) -> tuple:
     Marginal note lines (m-prefixed sequence) sort after main text lines
     within the same page.
     """
-    prefix, sequence = line_id.split("-lb-")
-    parts  = prefix.split("-")
-    page   = int(parts[-1])
-    volume = int(parts[-2])
-    work   = "-".join(parts[:-2])
-    is_marginal = sequence.startswith("m")
-    seq_num     = int(sequence[1:]) if is_marginal else int(sequence)
-    return (work, volume, page, is_marginal, seq_num)
+    try:
+        prefix, sequence = line_id.split("-lb-")
+        parts  = prefix.split("-")
+        page   = int(parts[-1])
+        volume = int(parts[-2])
+        work   = "-".join(parts[:-2])
+        is_marginal = sequence.startswith("m")
+        seq_num     = int(sequence[1:]) if is_marginal else int(sequence)
+        return (work, volume, page, is_marginal, seq_num)
+    except (ValueError, IndexError):
+        # Unknown ID format — fall back to string sort
+        return (line_id, 0, 0, False, 0)
 
 
 def crosses_page_break(id_a: str, id_b: str) -> bool:
