@@ -145,7 +145,7 @@ def extract_lines(tree: etree._ElementTree) -> tuple[list[ExtractedLine], dict[s
     lb_list = [lb for lb in all_lbs if lb.get("sameAs") is None]
 
     if not lb_list:
-        return []
+        return [], pre_annotated
 
     # Find notes with text before their first internal <lb/>.
     # These need synthetic line entries since no lb triggers extraction.
