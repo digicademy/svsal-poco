@@ -30,6 +30,7 @@ from lxml import etree
 TEI_NS = "http://www.tei-c.org/ns/1.0"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 NSMAP  = {"tei": TEI_NS, "xml": XML_NS}
+LINE_SEP = "¬"   # U+00AC — nonbreaking line separator in concatenated text
 
 
 def _detect_namespace(root: etree._Element) -> str:
@@ -85,6 +86,7 @@ class TextRun:
     plain_start:  int = 0            # offset in the stitched plain text
     plain_end:    int = 0
     from_choice:  bool = False
+
 
 @dataclass
 class NoteInfo:
@@ -159,12 +161,12 @@ def extract_lines(tree: etree._ElementTree) -> tuple[list[ExtractedLine], dict[s
         is_in_note = _is_inside_note(lb)
         line_id = _xml_id(lb) or f"__lb_{i}"
 
-        # Record pre-annotated boundary if this lb is known to be nonbreaking.
-        if lb.get("break") == "no":
-            next_lb = lb_list[i + 1] if i + 1 < len(lb_list) else None
-            if next_lb is not None:
-                next_id = _xml_id(next_lb) or f"__lb_{i+1}"
-                pre_annotated[line_id] = next_id
+        # Record pre-annotated boundary if this lb has break="no".
+        # break="no" on THIS lb means the PREVIOUS line continues here.
+        if lb.get("break") == "no" and i > 0:
+            prev_lb = lb_list[i - 1]
+            prev_id = _xml_id(prev_lb) or f"__lb_{i - 1}"
+            pre_annotated[prev_id] = line_id
 
         # Collect text runs between this lb and the next
         text_runs: list[TextRun] = []
@@ -611,6 +613,7 @@ def apply_expansions(
     2. For each change, wrap in <choice><abbr>orig</abbr><expan>expanded</expan></choice>
     3. If a note falls inside a changed range, move it to after </choice>
     4. Update <lb/> with @break="no" where boundary classifier detected nonbreaking
+    5. Handle cross-line abbreviations with <lb sameAs> in <expan>
 
     Returns the modified tree (modified in-place).
     """
@@ -623,15 +626,415 @@ def apply_expansions(
             if next_line is not None:
                 next_line.lb_element.set("break", "no")
 
-    # --- Apply expansions ---
-    for line in lines:
-        expanded = expanded_texts.get(line.line_id)
-        if expanded is None or expanded == line.plain_text:
-            continue
+    # --- Build nonbreaking chains ---
+    chains = _build_line_chains(lines, boundary_predictions)
 
-        _apply_line_expansion(line, expanded)
+    # --- Apply expansions per chain ---
+    for chain in chains:
+        if len(chain) == 1:
+            expanded = expanded_texts.get(chain[0].line_id)
+            if expanded is not None and expanded != chain[0].plain_text:
+                _apply_line_expansion(chain[0], expanded)
+        else:
+            _apply_chain_expansion(chain, expanded_texts)
 
     return tree
+
+
+def _build_line_chains(
+    lines:                list[ExtractedLine],
+    boundary_predictions: dict[str, str],
+) -> list[list[ExtractedLine]]:
+    """
+    Group lines into nonbreaking chains based on boundary predictions.
+    Each chain is a list of consecutive lines connected by nonbreaking boundaries.
+    """
+    line_by_id = {line.line_id: line for line in lines}
+    consumed: set[str] = set()
+    chains: list[list[ExtractedLine]] = []
+
+    for line in lines:
+        if line.line_id in consumed:
+            continue
+
+        chain = [line]
+        consumed.add(line.line_id)
+        current = line
+
+        while True:
+            next_id = boundary_predictions.get(current.line_id, "")
+            if not next_id or next_id in consumed or next_id not in line_by_id:
+                break
+            next_line = line_by_id[next_id]
+            chain.append(next_line)
+            consumed.add(next_id)
+            current = next_line
+
+        chains.append(chain)
+
+    return chains
+
+
+def _apply_chain_expansion(
+    chain:          list[ExtractedLine],
+    expanded_texts: dict[str, str],
+) -> None:
+    """
+    Apply expansions to a nonbreaking chain of lines.
+
+    Concatenates original and expanded texts with LINE_SEP, diffs the
+    concatenated strings, and dispatches each change:
+    - Changes within a single line → _apply_change_preserving_markup
+    - Changes crossing a LINE_SEP → _apply_cross_line_choice
+    """
+    # Concatenate originals and expanded with LINE_SEP
+    orig_parts = [line.plain_text for line in chain]
+    exp_parts = [expanded_texts.get(line.line_id, line.plain_text) for line in chain]
+
+    orig_concat = LINE_SEP.join(orig_parts)
+    exp_concat = LINE_SEP.join(exp_parts)
+
+    if orig_concat == exp_concat:
+        return
+
+    changes = _find_changes(orig_concat, exp_concat)
+    if not changes:
+        return
+
+    # Compute line boundaries and separator positions in concatenated string
+    line_boundaries: list[tuple[int, int]] = []
+    sep_positions: list[int] = []  # positions of LINE_SEP characters
+    offset = 0
+    for i, part in enumerate(orig_parts):
+        line_boundaries.append((offset, offset + len(part)))
+        offset += len(part)
+        if i < len(orig_parts) - 1:
+            sep_positions.append(offset)
+            offset += len(LINE_SEP)
+
+    # Process changes in reverse order
+    for orig_start, orig_end, exp_start, exp_end in reversed(changes):
+        orig_text = orig_concat[orig_start:orig_end]
+        exp_text = exp_concat[exp_start:exp_end]
+
+        if not orig_text or not exp_text:
+            continue
+
+        # Check if change spans a separator → cross-line
+        crossed_seps = [s for s in sep_positions if orig_start <= s < orig_end]
+
+        if not crossed_seps:
+            # Change is within a single line — find which one
+            line_idx = _find_line_for_offset(line_boundaries, orig_start)
+            line = chain[line_idx]
+            lb_start, _ = line_boundaries[line_idx]
+            local_start = orig_start - lb_start
+            local_end = orig_end - lb_start
+
+            # Check notes
+            affected_notes = [
+                n for n in line.notes
+                if local_start <= n.plain_offset < local_end
+            ]
+
+            choice = _apply_change_preserving_markup(
+                line, local_start, local_end, exp_text,
+            )
+
+            if choice is not None:
+                for note_info in affected_notes:
+                    _move_note_after(note_info, choice)
+
+        else:
+            # Change crosses line boundaries — cross-line abbreviation
+            # Find which lines are involved
+            first_sep = crossed_seps[0]
+            start_line_idx = _find_line_for_offset(line_boundaries, first_sep - 1)
+            end_line_idx = _find_line_for_offset(line_boundaries, orig_end - 1)
+            # Clamp: if orig_end lands on a separator, use the line before
+            if end_line_idx < 0:
+                end_line_idx = len(chain) - 1
+
+            _apply_cross_line_choice(
+                chain, line_boundaries,
+                start_line_idx, end_line_idx,
+                orig_start, orig_end,
+                orig_text, exp_text,
+            )
+
+
+def _find_line_for_offset(
+    line_boundaries: list[tuple[int, int]],
+    offset: int,
+) -> int:
+    """Find which line index contains the given offset in concatenated text."""
+    for i, (start, end) in enumerate(line_boundaries):
+        if start <= offset < end:
+            return i
+    # If offset is at the very end, return last line
+    return len(line_boundaries) - 1
+
+
+def _apply_cross_line_choice(
+    chain:           list[ExtractedLine],
+    line_boundaries: list[tuple[int, int]],
+    start_line_idx:  int,
+    end_line_idx:    int,
+    orig_start:      int,
+    orig_end:        int,
+    orig_text:       str,
+    exp_text:        str,
+) -> None:
+    """
+    Build a cross-line <choice> element for an abbreviation spanning
+    a nonbreaking line boundary.
+
+    Produces:
+      <choice>
+        <abbr>part1<lb xml:id="X" break="no"/>part2</abbr>
+        <expan>exp1<lb sameAs="#X"/>exp2</expan>
+      </choice>
+    """
+    if end_line_idx - start_line_idx != 1:
+        return  # only handle 2-line spans for now
+
+    line1 = chain[start_line_idx]
+    line2 = chain[end_line_idx]
+    lb1_start, _ = line_boundaries[start_line_idx]
+    lb2_start, _ = line_boundaries[end_line_idx]
+
+    l1_text = line1.plain_text
+    l2_text = line2.plain_text
+
+    # Find the last word in L1 (cross-line word's first part)
+    # Strip trailing whitespace (XML formatting artifact) before scanning
+    l1_stripped = l1_text.rstrip()
+    pos = len(l1_stripped)
+    while pos > 0 and not l1_stripped[pos - 1].isspace():
+        pos -= 1
+    word_start_in_l1 = pos
+    abbr_part1 = l1_stripped[word_start_in_l1:]
+
+    # Find the first word in L2 (cross-line word's second part)
+    # Skip leading whitespace
+    l2_content_start = 0
+    while l2_content_start < len(l2_text) and l2_text[l2_content_start].isspace():
+        l2_content_start += 1
+    pos = l2_content_start
+    while pos < len(l2_text) and not l2_text[pos].isspace():
+        pos += 1
+    word_end_in_l2 = pos
+    abbr_part2 = l2_text[l2_content_start:word_end_in_l2]
+
+    # Build the full expanded word.
+    # The diff's exp_text covers the changed portion (may include LINE_SEP).
+    # We need the full word including any unchanged prefix from L1.
+    exp_clean = exp_text.replace(LINE_SEP, "")
+
+    # How much of L1's word portion is NOT covered by the diff?
+    diff_local_start_in_l1 = orig_start - lb1_start
+    l1_prefix = l1_text[word_start_in_l1:min(diff_local_start_in_l1, len(l1_text))]
+    l1_prefix = l1_prefix.rstrip()
+
+    full_exp = l1_prefix + exp_clean
+
+    # Split expanded word at proportional position
+    total_abbr_len = len(abbr_part1) + len(abbr_part2)
+    if total_abbr_len > 0:
+        split = round(len(full_exp) * len(abbr_part1) / total_abbr_len)
+    else:
+        split = len(full_exp) // 2
+    exp_part1 = full_exp[:split]
+    exp_part2 = full_exp[split:]
+
+    # --- Build <choice> element ---
+    choice = etree.Element(_tag("choice"))
+    abbr_el = etree.SubElement(choice, _tag("abbr"))
+    expan_el = etree.SubElement(choice, _tag("expan"))
+
+    # <abbr>: part1 from L1 (with inline elements) + <lb/> + part2 from L2
+    l1_end_stripped = len(l1_text.rstrip())
+    _populate_abbr_from_runs(
+        abbr_el, line1.text_runs, word_start_in_l1, l1_end_stripped,
+    )
+
+    # Clone L2's <lb/> into <abbr>
+    lb2_el = line2.lb_element
+    lb2_id = _xml_id(lb2_el)
+    lb2_clone = copy.deepcopy(lb2_el)
+    lb2_clone.tail = None
+    abbr_el.append(lb2_clone)
+
+    # Add part2 from L2 as content after the <lb/> in <abbr>
+    _populate_abbr_from_runs_as_tail(
+        lb2_clone, abbr_el, line2.text_runs, 0, word_end_in_l2,
+    )
+
+    # <expan>: exp_part1 + <lb sameAs="#id"/> + exp_part2
+    expan_el.text = exp_part1
+    lb_same = etree.SubElement(expan_el, _tag("lb"))
+    if lb2_id:
+        lb_same.set("sameAs", f"#{lb2_id}")
+    lb_same.tail = exp_part2
+
+    # --- Tree surgery ---
+    _truncate_line_end(line1, word_start_in_l1)
+    _remove_line_start(line2, word_end_in_l2, lb2_el)
+    _insert_choice_at_line_end(line1, word_start_in_l1, choice)
+
+    remaining = l2_text[word_end_in_l2:]
+    choice.tail = remaining if remaining else None
+
+
+def _populate_abbr_from_runs(
+    abbr_el:    etree._Element,
+    text_runs:  list[TextRun],
+    start:      int,
+    end:        int,
+) -> None:
+    """Populate <abbr> with text/inline elements from runs within [start, end)."""
+    last_child = None
+    for run in text_runs:
+        if run.plain_end <= start or run.plain_start >= end:
+            continue
+        clip_start = max(start, run.plain_start) - run.plain_start
+        clip_end = min(end, run.plain_end) - run.plain_start
+        portion = run.text[clip_start:clip_end]
+        if not portion:
+            continue
+
+        if not run.is_tail and _is_inline_element(run.node):
+            cloned = copy.deepcopy(run.node)
+            cloned.text = portion
+            cloned.tail = None
+            for child in list(cloned):
+                cloned.remove(child)
+            abbr_el.append(cloned)
+            last_child = cloned
+        else:
+            if last_child is not None:
+                last_child.tail = (last_child.tail or "") + portion
+            else:
+                abbr_el.text = (abbr_el.text or "") + portion
+
+
+def _populate_abbr_from_runs_as_tail(
+    after_el:   etree._Element,
+    abbr_el:    etree._Element,
+    text_runs:  list[TextRun],
+    start:      int,
+    end:        int,
+) -> None:
+    """Populate <abbr> with runs from [start, end), placing first text as after_el.tail."""
+    last_child = after_el
+    for run in text_runs:
+        if run.plain_end <= start or run.plain_start >= end:
+            continue
+        clip_start = max(start, run.plain_start) - run.plain_start
+        clip_end = min(end, run.plain_end) - run.plain_start
+        portion = run.text[clip_start:clip_end]
+        if not portion:
+            continue
+
+        if not run.is_tail and _is_inline_element(run.node):
+            cloned = copy.deepcopy(run.node)
+            cloned.text = portion
+            cloned.tail = None
+            for child in list(cloned):
+                cloned.remove(child)
+            abbr_el.append(cloned)
+            last_child = cloned
+        else:
+            last_child.tail = (last_child.tail or "") + portion
+
+
+def _truncate_line_end(line: ExtractedLine, at_offset: int) -> None:
+    """Remove text from at_offset onwards in a line, including inline elements."""
+    for run in reversed(line.text_runs):
+        if run.plain_start >= at_offset:
+            # Entire run is after the cut — clear it
+            if run.is_tail:
+                run.node.tail = None
+            elif _is_inline_element(run.node):
+                parent = run.node.getparent()
+                if parent is not None:
+                    # Transfer tail before removal
+                    if run.node.tail:
+                        prev = run.node.getprevious()
+                        if prev is not None:
+                            prev.tail = (prev.tail or "") + run.node.tail
+                        else:
+                            parent.text = (parent.text or "") + run.node.tail
+                    parent.remove(run.node)
+            else:
+                run.node.text = None
+        elif run.plain_end > at_offset:
+            # Run partially overlaps — truncate
+            local_cut = at_offset - run.plain_start
+            truncated = run.text[:local_cut]
+            if run.is_tail:
+                run.node.tail = truncated if truncated else None
+            else:
+                run.node.text = truncated if truncated else None
+
+
+def _remove_line_start(
+    line:       ExtractedLine,
+    up_to:      int,
+    lb_el:      etree._Element,
+) -> None:
+    """Remove text from start up to up_to in a line, and remove the lb element."""
+    for run in line.text_runs:
+        if run.plain_end <= up_to:
+            # Entire run before cut — clear it
+            if run.is_tail:
+                run.node.tail = None
+            elif _is_inline_element(run.node):
+                parent = run.node.getparent()
+                if parent is not None:
+                    parent.remove(run.node)
+            else:
+                run.node.text = None
+        elif run.plain_start < up_to:
+            # Run partially overlaps — truncate from start
+            local_cut = up_to - run.plain_start
+            remaining = run.text[local_cut:]
+            if run.is_tail:
+                run.node.tail = remaining if remaining else None
+            else:
+                run.node.text = remaining if remaining else None
+
+    # Remove the <lb/> element from the tree (it's now inside <abbr>)
+    parent = lb_el.getparent()
+    if parent is not None:
+        # lb's tail was the first text of this line — already cleared above
+        lb_el.tail = None
+        parent.remove(lb_el)
+
+
+def _insert_choice_at_line_end(
+    line:       ExtractedLine,
+    at_offset:  int,
+    choice:     etree._Element,
+) -> None:
+    """Insert <choice> at the position where line1's text was truncated."""
+    # Find the last text run before/at the cut point
+    for run in reversed(line.text_runs):
+        if run.plain_start < at_offset:
+            if run.is_tail:
+                parent = run.node.getparent()
+                idx = list(parent).index(run.node)
+                parent.insert(idx + 1, choice)
+            else:
+                run.node.insert(0, choice)
+            return
+
+    # Fallback: insert after the lb element
+    lb = line.lb_element
+    parent = lb.getparent()
+    if parent is not None:
+        idx = list(parent).index(lb)
+        parent.insert(idx + 1, choice)
 
 
 def _apply_line_expansion(
@@ -663,28 +1066,13 @@ def _apply_line_expansion(
             if orig_start <= n.plain_offset < orig_end
         ]
 
-        # Find which text runs are affected
-        affected_runs = [
-            r for r in line.text_runs
-            if r.plain_end > orig_start and r.plain_start < orig_end
-        ]
-
-        # Skip if all affected runs are from existing <choice> elements
-        if all(r.from_choice for r in affected_runs):
-            continue
-
-        if not affected_runs:
-            continue
-
-        # Build the <choice> element
-        choice = _build_choice_element(orig_text, exp_text)
-
-        # Insert the <choice> into the tree, replacing the affected text
-        _replace_text_range(
-            line.text_runs, affected_runs,
-            orig_start, orig_end,
-            choice,
+        # Apply the change, preserving inline markup in <abbr>
+        choice = _apply_change_preserving_markup(
+            line, orig_start, orig_end, exp_text,
         )
+
+        if choice is None:
+            continue
 
         # Move affected notes to after the <choice>
         for note_info in affected_notes:
@@ -762,134 +1150,146 @@ def _merge_changes(
     return merged
 
 
-def _build_choice_element(
-    abbr_text: str,
-    expan_text: str,
-) -> etree._Element:
-    """
-    Build a <choice><abbr>...</abbr><expan>...</expan></choice> element.
-    """
-    choice = etree.Element(_tag("choice"))
-    abbr = etree.SubElement(choice, _tag("abbr"))
-    abbr.text = abbr_text
-    expan = etree.SubElement(choice, _tag("expan"))
-    expan.text = expan_text
-    return choice
+def _is_inline_element(node: etree._Element) -> bool:
+    """Check if a node is an inline element (g, hi, foreign, etc.) vs structural."""
+    tag = node.tag
+    if not isinstance(tag, str):
+        return False
+    local = tag.split("}")[-1] if "}" in tag else tag
+    return local in ("g", "hi", "foreign", "ref", "term", "mentioned",
+                     "title", "emph", "sic", "corr", "supplied", "del", "add")
 
 
-def _replace_text_range(
-    all_runs:      list[TextRun],
-    affected_runs: list[TextRun],
-    orig_start:    int,
-    orig_end:      int,
-    choice:        etree._Element,
-) -> None:
-    """
-    Replace a character range in the tree with a <choice> element.
-
-    This is the most delicate operation. It needs to:
-    1. Split text nodes at the change boundaries
-    2. Remove the old text
-    3. Insert the <choice> element at the correct position
-
-    For simplicity, handles the common case where the change falls
-    within a single text run. Multi-run changes (spanning inline tags)
-    are handled by collapsing the affected range.
-    """
-    if len(affected_runs) == 1:
-        run = affected_runs[0]
-        _replace_in_single_run(run, orig_start, orig_end, choice)
-    else:
-        # Multi-run change: replace from first run's start to last run's end
-        _replace_across_runs(affected_runs, orig_start, orig_end, choice)
-
-
-def _replace_in_single_run(
-    run:        TextRun,
+def _apply_change_preserving_markup(
+    line:       ExtractedLine,
     orig_start: int,
     orig_end:   int,
-    choice:     etree._Element,
-) -> None:
+    expan_text: str,
+) -> Optional[etree._Element]:
     """
-    Replace a range within a single TextRun with a <choice> element.
+    Apply a single abbreviation expansion to the XML tree,
+    preserving inline elements (like <g>) inside <abbr>.
 
-    Splits the text node into: before + <choice> + after.
+    Returns the created <choice> element, or None if skipped.
     """
-    # Offsets within this run's text
-    local_start = orig_start - run.plain_start
-    local_end = orig_end - run.plain_start
+    affected_runs = [
+        r for r in line.text_runs
+        if r.plain_end > orig_start and r.plain_start < orig_end
+    ]
 
-    before_text = run.text[:local_start]
-    after_text = run.text[local_end:]
+    if not affected_runs:
+        return None
 
-    node = run.node
-    if run.is_tail:
-        # This is tail text — text after a closing tag
-        # Set tail to the 'before' part, insert <choice> after node,
-        # then set choice's tail to the 'after' part
-        node.tail = before_text or None
-        parent = node.getparent()
-        idx = list(parent).index(node)
-        parent.insert(idx + 1, choice)
-        choice.tail = after_text or None
-    else:
-        # This is element text — text before first child
-        node.text = before_text or None
-        node.insert(0, choice)
-        choice.tail = after_text or None
+    # Skip if all affected runs are from existing <choice> elements
+    if all(r.from_choice for r in affected_runs):
+        return None
 
-
-def _replace_across_runs(
-    affected_runs: list[TextRun],
-    orig_start:    int,
-    orig_end:      int,
-    choice:        etree._Element,
-) -> None:
-    """
-    Replace a range spanning multiple TextRuns.
-
-    This happens when an abbreviation spans across an inline element
-    boundary, e.g. <hi>cōsen</hi>sus where the expansion is "consensus".
-
-    Strategy: truncate the first run, remove intermediate content,
-    truncate the last run, and insert <choice> at the first run's position.
-    """
     first_run = affected_runs[0]
     last_run = affected_runs[-1]
 
-    # Truncate first run
-    local_start = orig_start - first_run.plain_start
-    before_text = first_run.text[:local_start]
+    # --- Build <choice> element ---
+    choice = etree.Element(_tag("choice"))
+    abbr_el = etree.SubElement(choice, _tag("abbr"))
+    expan_el = etree.SubElement(choice, _tag("expan"))
+    expan_el.text = expan_text
 
-    # Truncate last run
-    local_end = orig_end - last_run.plain_start
-    after_text = last_run.text[local_end:]
+    # --- Build <abbr> content preserving inline elements ---
+    abbr_last_child = None  # tracks last element appended to abbr
 
-    # Set up the first run's text
+    for run in affected_runs:
+        clip_start = max(orig_start, run.plain_start) - run.plain_start
+        clip_end = min(orig_end, run.plain_end) - run.plain_start
+        text_portion = run.text[clip_start:clip_end]
+
+        if not text_portion:
+            continue
+
+        if not run.is_tail and _is_inline_element(run.node):
+            # Clone the inline element into <abbr>
+            cloned = copy.deepcopy(run.node)
+            cloned.text = text_portion
+            cloned.tail = None
+            for child in list(cloned):
+                cloned.remove(child)
+            abbr_el.append(cloned)
+            abbr_last_child = cloned
+        else:
+            # Plain text
+            if abbr_last_child is not None:
+                abbr_last_child.tail = (abbr_last_child.tail or "") + text_portion
+            else:
+                abbr_el.text = (abbr_el.text or "") + text_portion
+
+    # --- Determine insertion point ---
     if first_run.is_tail:
-        first_run.node.tail = before_text or None
-        parent = first_run.node.getparent()
-        idx = list(parent).index(first_run.node)
-        parent.insert(idx + 1, choice)
+        insert_parent = first_run.node.getparent()
+        insert_after = first_run.node
     else:
-        first_run.node.text = before_text or None
-        first_run.node.insert(0, choice)
+        if _is_inline_element(first_run.node):
+            insert_parent = first_run.node.getparent()
+            insert_after = first_run.node.getprevious()
+        else:
+            insert_parent = first_run.node
+            insert_after = None  # insert as first child
 
-    choice.tail = after_text or None
+    # --- Capture tail text that survives after </choice> ---
+    local_end_in_last = orig_end - last_run.plain_start
 
-    # Remove intermediate runs' text content
-    for run in affected_runs[1:-1]:
+    if last_run.is_tail:
+        after_text = last_run.text[local_end_in_last:]
+    else:
+        after_text = last_run.node.tail or ""
+
+    # --- Tree surgery ---
+
+    # Truncate first run (keep text before the change)
+    local_start_in_first = orig_start - first_run.plain_start
+    before_text = first_run.text[:local_start_in_first]
+
+    if first_run.is_tail:
+        first_run.node.tail = before_text if before_text else None
+    elif not _is_inline_element(first_run.node):
+        first_run.node.text = before_text if before_text else None
+
+    # Remove inline elements that were cloned into <abbr>
+    nodes_to_remove: list[etree._Element] = []
+    consumed_tails: set[int] = set()
+    for run in affected_runs:
+        if not run.is_tail and _is_inline_element(run.node):
+            nodes_to_remove.append(run.node)
         if run.is_tail:
-            run.node.tail = None
-        else:
-            run.node.text = None
+            consumed_tails.add(id(run.node))
 
-    # Clear the last run's consumed portion
-    if last_run is not first_run:
-        if last_run.is_tail:
-            last_run.node.tail = None
-        else:
-            last_run.node.text = None
+    for node in nodes_to_remove:
+        parent = node.getparent()
+        if parent is not None:
+            if node.tail and node is last_run.node:
+                pass  # will become choice.tail
+            elif node.tail and id(node) not in consumed_tails:
+                prev = node.getprevious()
+                if prev is not None:
+                    prev.tail = (prev.tail or "") + node.tail
+                else:
+                    parent.text = (parent.text or "") + node.tail
+            parent.remove(node)
+
+    # Clear last run's consumed text
+    if last_run is not first_run and not last_run.is_tail and not _is_inline_element(last_run.node):
+        last_run.node.text = None
+    if last_run is not first_run and last_run.is_tail:
+        last_run.node.tail = None
+
+    # --- Insert <choice> ---
+    choice.tail = after_text if after_text else None
+
+    if insert_after is not None:
+        idx = list(insert_parent).index(insert_after) + 1
+    else:
+        idx = 0
+
+    insert_parent.insert(idx, choice)
+
+    return choice
 
 
 def _move_note_after(
