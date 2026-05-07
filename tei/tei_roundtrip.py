@@ -36,7 +36,7 @@ LINE_SEP = "¬"   # U+00AC — nonbreaking line separator in concatenated text
 # Model identifiers for resp attributes on auto-generated elements.
 # Set these before calling process_tei_xml, or pass model names to it.
 EXPANSION_MODEL = "byt5-salamanca-abbr"
-BOUNDARY_MODEL  = "canine-salamanca-boundary-classifier"
+BOUNDARY_MODEL  = "flair-lb-detector"
 
 
 def _expansion_resp() -> str:
