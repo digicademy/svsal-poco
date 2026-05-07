@@ -1,4 +1,4 @@
-git+https://github.com/digicademy/svsal-poco@68c507c
+git+https://github.com/digicademy/svsal-poco@6b8d236
 spaces
 sentencepiece
 lxml
