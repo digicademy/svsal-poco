@@ -12,4 +12,5 @@ flair-lb-detector/
 *.json
 *.err
 *.out
+*.bak
 !pyproject.toml
