@@ -4,6 +4,7 @@ test-output/
 test-output-byt5/
 byt5-salamanca-abbr/
 canine-salamanca-boundary-classifier/
+flair-lb-detector/
 .env
 *.pyc
 *.pt
