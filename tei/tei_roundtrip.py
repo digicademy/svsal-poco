@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Optional
@@ -31,6 +32,48 @@ TEI_NS = "http://www.tei-c.org/ns/1.0"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 NSMAP  = {"tei": TEI_NS, "xml": XML_NS}
 LINE_SEP = "¬"   # U+00AC — nonbreaking line separator in concatenated text
+
+# Model identifiers for resp attributes on auto-generated elements.
+# Set these before calling process_tei_xml, or pass model names to it.
+EXPANSION_MODEL = "byt5-salamanca-abbr"
+BOUNDARY_MODEL  = "canine-salamanca-boundary-classifier"
+
+
+def _expansion_resp() -> str:
+    """Build resp attribute value for expansion-generated elements."""
+    return f"#auto #{EXPANSION_MODEL}"
+
+
+def _boundary_resp() -> str:
+    """Build resp attribute value for boundary-generated elements."""
+    return f"#auto #{BOUNDARY_MODEL}"
+
+# Punctuation that marks word boundaries (not part of abbreviation tokens)
+WORD_BREAK_PUNCT = set('.,:!?()[]')
+
+
+def _is_punctuation_only_change(orig: str, expanded: str) -> bool:
+    """
+    Return True if the only difference between orig and expanded is
+    whitespace or punctuation — not a real abbreviation expansion.
+    Filters out model artifacts like 'quia\\n' → 'quia,'.
+    """
+    # Extract just the letters from both
+    orig_letters = "".join(c for c in orig if c.isalpha())
+    exp_letters = "".join(c for c in expanded if c.isalpha())
+    return orig_letters == exp_letters
+EQUIV = {
+    'u': 'v', 'v': 'u',
+    'U': 'V', 'V': 'U',
+    's': 'ſ', 'ſ': 's',
+    'y': '⁊', '⁊': 'y',
+    'z': 'ʒ', 'ʒ': 'z',
+#    'ꝗ': 'q', 'q': 'ꝗ',
+}
+
+
+def chars_match(a, b):
+    return a == b or EQUIV.get(a) == b
 
 
 def _detect_namespace(root: etree._Element) -> str:
@@ -604,6 +647,7 @@ def apply_expansions(
     lines:                list[ExtractedLine],
     expanded_texts:       dict[str, str],     # line_id → expanded plain text
     boundary_predictions: dict[str, str],     # line_id → next_line_id (nonbreaking)
+    pre_annotated:        dict[str, str] = None,  # boundaries already in source XML
 ) -> etree._ElementTree:
     """
     Apply abbreviation expansions and boundary predictions back to the XML tree.
@@ -617,14 +661,20 @@ def apply_expansions(
 
     Returns the modified tree (modified in-place).
     """
+    pre_annotated = pre_annotated or {}
+
     # --- Apply boundary predictions ---
     line_by_id = {line.line_id: line for line in lines}
     for line in lines:
         if line.line_id in boundary_predictions:
+            # Skip if this boundary already existed in the source XML
+            if line.line_id in pre_annotated:
+                continue
             next_line_id = boundary_predictions[line.line_id]
             next_line = line_by_id.get(next_line_id)
             if next_line is not None:
                 next_line.lb_element.set("break", "no")
+                next_line.lb_element.set("resp", _boundary_resp())
 
     # --- Build nonbreaking chains ---
     chains = _build_line_chains(lines, boundary_predictions)
@@ -720,6 +770,10 @@ def _apply_chain_expansion(
         if not orig_text or not exp_text:
             continue
 
+        # Skip changes that are only whitespace/punctuation differences
+        if _is_punctuation_only_change(orig_text, exp_text):
+            continue
+
         # Check if change spans a separator → cross-line
         crossed_seps = [s for s in sep_positions if orig_start <= s < orig_end]
 
@@ -775,6 +829,114 @@ def _find_line_for_offset(
     return len(line_boundaries) - 1
 
 
+def _find_tgt_break(full_src, full_tgt, src_break):
+    def _is_abbr_or_combining(c):
+        cat = unicodedata.category(c)
+        if cat.startswith('M'):
+            return True
+        if cat == 'Co':
+            return True
+        if not c.isascii() and cat.startswith('L'):
+            return True
+        return False
+
+    def _is_plain(c):
+        return not _is_abbr_or_combining(c)
+
+    def _align(src, tgt, brk):
+        if len(src) == 0:
+            return 0
+        if brk <= 0:
+            return 0
+        if brk >= len(src):
+            return len(tgt)
+
+        prefix = 0
+        for i in range(min(len(src), len(tgt))):
+            if chars_match(src[i], tgt[i]):
+                prefix = i + 1
+            else:
+                break
+
+        if brk <= prefix:
+            return brk
+
+        suffix = 0
+        for i in range(1, min(len(src), len(tgt)) + 1):
+            if chars_match(src[-i], tgt[-i]):
+                suffix = i
+            else:
+                break
+
+        if suffix > 0 and brk >= len(src) - suffix:
+            return len(tgt) - (len(src) - brk)
+
+        s_end = len(src) - suffix if suffix else len(src)
+        t_end = len(tgt) - suffix if suffix else len(tgt)
+        src_gap = src[prefix:s_end]
+        tgt_gap = tgt[prefix:t_end]
+        gap_brk = brk - prefix
+
+        if not src_gap or not tgt_gap:
+            return prefix
+
+        for si in range(len(src_gap)):
+            if not _is_plain(src_gap[si]):
+                continue
+            for ti in range(len(tgt_gap)):
+                if not chars_match(src_gap[si], tgt_gap[ti]):
+                    continue
+                next_si = si + 1
+                while next_si < len(src_gap) and not _is_plain(src_gap[next_si]):
+                    next_si += 1
+                if next_si < len(src_gap) and ti + 1 + (next_si - si - 1) < len(tgt_gap):
+                    confirmed = False
+                    for ti2 in range(ti + 1, min(ti + 1 + (next_si - si) * 3, len(tgt_gap))):
+                        if chars_match(src_gap[next_si], tgt_gap[ti2]):
+                            confirmed = True
+                            break
+                    if not confirmed:
+                        continue
+                if gap_brk <= si:
+                    sub = _align(src_gap[:si], tgt_gap[:ti], gap_brk)
+                    if sub is None:
+                        return None
+                    return prefix + sub
+                else:
+                    sub = _align(src_gap[si:], tgt_gap[ti:], gap_brk - si)
+                    if sub is None:
+                        return None
+                    return prefix + ti + sub
+        return None
+
+    return _align(full_src, full_tgt, src_break)
+
+
+def _find_tgt_break_with_fallback(full_src, full_tgt, src_break):
+    tgt_break = _find_tgt_break(full_src, full_tgt, src_break)
+
+    if tgt_break is not None:
+        return tgt_break
+
+    suffix_len = 0
+    for sc, tc in zip(reversed(full_src), reversed(full_tgt)):
+        if sc == tc and sc.isascii() and sc.isalpha():
+            suffix_len += 1
+        else:
+            break
+
+    if suffix_len == 0:
+        return None
+
+    chars_after_break = len(full_src) - src_break
+    tgt_break = len(full_tgt) - chars_after_break
+
+    if 0 < tgt_break < len(full_tgt):
+        return tgt_break
+
+    return None
+
+
 def _apply_cross_line_choice(
     chain:           list[ExtractedLine],
     line_boundaries: list[tuple[int, int]],
@@ -806,22 +968,24 @@ def _apply_cross_line_choice(
     l1_text = line1.plain_text
     l2_text = line2.plain_text
 
+    # Punctuation that should NOT be part of abbreviation tokens
+    # (semicolon excluded — it's part of abbreviations like atq;)
+    WORD_BREAK_PUNCT = set('.,:!?()[]')
+
     # Find the last word in L1 (cross-line word's first part)
-    # Strip trailing whitespace (XML formatting artifact) before scanning
     l1_stripped = l1_text.rstrip()
     pos = len(l1_stripped)
-    while pos > 0 and not l1_stripped[pos - 1].isspace():
+    while pos > 0 and not l1_stripped[pos - 1].isspace() and l1_stripped[pos - 1] not in WORD_BREAK_PUNCT:
         pos -= 1
     word_start_in_l1 = pos
     abbr_part1 = l1_stripped[word_start_in_l1:]
 
     # Find the first word in L2 (cross-line word's second part)
-    # Skip leading whitespace
     l2_content_start = 0
     while l2_content_start < len(l2_text) and l2_text[l2_content_start].isspace():
         l2_content_start += 1
     pos = l2_content_start
-    while pos < len(l2_text) and not l2_text[pos].isspace():
+    while pos < len(l2_text) and not l2_text[pos].isspace() and l2_text[pos] not in WORD_BREAK_PUNCT:
         pos += 1
     word_end_in_l2 = pos
     abbr_part2 = l2_text[l2_content_start:word_end_in_l2]
@@ -838,10 +1002,21 @@ def _apply_cross_line_choice(
 
     full_exp = l1_prefix + exp_clean
 
+    # Strip trailing punctuation from expanded word (same as abbr)
+    trailing_punct = ""
+    while full_exp and full_exp[-1] in WORD_BREAK_PUNCT:
+        trailing_punct = full_exp[-1] + trailing_punct
+        full_exp = full_exp[:-1]
+
     # Split expanded word at proportional position
     total_abbr_len = len(abbr_part1) + len(abbr_part2)
     if total_abbr_len > 0:
-        split = round(len(full_exp) * len(abbr_part1) / total_abbr_len)
+        src_break = len(abbr_part1)
+        full_abbr = abbr_part1 + abbr_part2
+        split = _find_tgt_break_with_fallback(full_abbr, full_exp, src_break)
+        if split is None:
+            # fallback to ratio if alignment fails entirely
+            split = round(len(full_exp) * len(abbr_part1) / max(total_abbr_len, 1))
     else:
         split = len(full_exp) // 2
     exp_part1 = full_exp[:split]
@@ -849,8 +1024,10 @@ def _apply_cross_line_choice(
 
     # --- Build <choice> element ---
     choice = etree.Element(_tag("choice"))
+    choice.set("resp", _expansion_resp())
     abbr_el = etree.SubElement(choice, _tag("abbr"))
     expan_el = etree.SubElement(choice, _tag("expan"))
+    expan_el.set("resp", _expansion_resp())
 
     # <abbr>: part1 from L1 (with inline elements) + <lb/> + part2 from L2
     l1_end_stripped = len(l1_text.rstrip())
@@ -879,11 +1056,22 @@ def _apply_cross_line_choice(
 
     # --- Tree surgery ---
     _truncate_line_end(line1, word_start_in_l1)
+
+    # Compute choice.tail: only the un-consumed portion of the last
+    # partially-consumed run. Remaining tree nodes stay in place.
+    choice_tail = ""
+    for run in line2.text_runs:
+        if run.plain_start >= word_end_in_l2:
+            break  # remaining runs stay in the tree
+        if run.plain_end > word_end_in_l2:
+            # Partially consumed — remaining text becomes choice.tail
+            local_cut = word_end_in_l2 - run.plain_start
+            choice_tail = run.text[local_cut:]
+
     _remove_line_start(line2, word_end_in_l2, lb2_el)
     _insert_choice_at_line_end(line1, word_start_in_l1, choice)
 
-    remaining = l2_text[word_end_in_l2:]
-    choice.tail = remaining if remaining else None
+    choice.tail = choice_tail if choice_tail else (trailing_punct if trailing_punct else None)
 
 
 def _populate_abbr_from_runs(
@@ -984,15 +1172,19 @@ def _remove_line_start(
     lb_el:      etree._Element,
 ) -> None:
     """Remove text from start up to up_to in a line, and remove the lb element."""
+    # First pass: clear/truncate text content
+    # Track which inline elements had their text fully consumed
+    # but might still have surviving tail text
+    elements_to_maybe_remove: list[etree._Element] = []
+
     for run in line.text_runs:
         if run.plain_end <= up_to:
             # Entire run before cut — clear it
             if run.is_tail:
                 run.node.tail = None
             elif _is_inline_element(run.node):
-                parent = run.node.getparent()
-                if parent is not None:
-                    parent.remove(run.node)
+                run.node.text = None
+                elements_to_maybe_remove.append(run.node)
             else:
                 run.node.text = None
         elif run.plain_start < up_to:
@@ -1004,10 +1196,28 @@ def _remove_line_start(
             else:
                 run.node.text = remaining if remaining else None
 
+    # Second pass: remove inline elements that have no text AND no tail
+    for el in elements_to_maybe_remove:
+        if not el.text and not el.tail:
+            parent = el.getparent()
+            if parent is not None:
+                parent.remove(el)
+        elif not el.text and el.tail:
+            # Element has no text but surviving tail — keep it but
+            # it's now an empty wrapper. Convert to just tail text
+            # on the previous sibling or parent.
+            parent = el.getparent()
+            if parent is not None:
+                prev = el.getprevious()
+                if prev is not None:
+                    prev.tail = (prev.tail or "") + el.tail
+                else:
+                    parent.text = (parent.text or "") + el.tail
+                parent.remove(el)
+
     # Remove the <lb/> element from the tree (it's now inside <abbr>)
     parent = lb_el.getparent()
     if parent is not None:
-        # lb's tail was the first text of this line — already cleared above
         lb_el.tail = None
         parent.remove(lb_el)
 
@@ -1058,6 +1268,10 @@ def _apply_line_expansion(
         exp_text = expanded[exp_start:exp_end]
 
         if not orig_text or not exp_text:
+            continue
+
+        # Skip changes that are only whitespace/punctuation differences
+        if _is_punctuation_only_change(orig_text, exp_text):
             continue
 
         # Check if any notes fall inside this change range
@@ -1189,8 +1403,10 @@ def _apply_change_preserving_markup(
 
     # --- Build <choice> element ---
     choice = etree.Element(_tag("choice"))
+    choice.set("resp", _expansion_resp())
     abbr_el = etree.SubElement(choice, _tag("abbr"))
     expan_el = etree.SubElement(choice, _tag("expan"))
+    expan_el.set("resp", _expansion_resp())
     expan_el.text = expan_text
 
     # --- Build <abbr> content preserving inline elements ---
@@ -1339,8 +1555,10 @@ def _move_note_after(
 # ---------------------------------------------------------------------------
 
 def process_tei_xml(
-    xml_string:  str,
-    run_pipeline_fn,   # callable: (lines_jsonl) → (expanded_dict, boundary_dict)
+    xml_string:       str,
+    run_pipeline_fn,  # callable: (lines_jsonl, pre_annotated) → (expanded_dict, boundary_dict)
+    expansion_model:  Optional[str] = None,
+    boundary_model:   Optional[str] = None,
 ) -> str:
     """
     Full roundtrip: TEI XML string → expand abbreviations → TEI XML string.
@@ -1351,12 +1569,19 @@ def process_tei_xml(
     4. Apply expansions and boundary predictions back to XML
     5. Serialize back to string
 
-    run_pipeline_fn should accept a list of line dicts
-    [{id, doc_id, source_sic, lang}] and return
-    (expanded_dict, boundary_dict) where:
-      - expanded_dict: {line_id: expanded_text}
-      - boundary_dict: {line_id: next_line_id} for nonbreaking boundaries
+    run_pipeline_fn should accept (line_dicts, pre_annotated_boundaries)
+    and return (expanded_dict, boundary_dict).
+
+    expansion_model / boundary_model: model names for resp attributes
+    on auto-generated elements. Defaults to module-level EXPANSION_MODEL
+    and BOUNDARY_MODEL.
     """
+    # Set model names for resp attributes
+    global EXPANSION_MODEL, BOUNDARY_MODEL
+    if expansion_model is not None:
+        EXPANSION_MODEL = expansion_model
+    if boundary_model is not None:
+        BOUNDARY_MODEL = boundary_model
     # Parse
     parser = etree.XMLParser(remove_blank_text=False)
     tree = etree.ElementTree(etree.fromstring(xml_string.encode("utf-8"), parser))
@@ -1388,11 +1613,70 @@ def process_tei_xml(
     )
 
     # Apply results
-    apply_expansions(tree, lines, expanded_dict, boundary_dict)
+    apply_expansions(tree, lines, expanded_dict, boundary_dict, pre_annotated)
 
     # Serialize
-    return etree.tostring(
+    raw = etree.tostring(
         tree.getroot(),
         encoding="unicode",
         pretty_print=False,
     )
+
+    # Post-process: format <lb break="no"/> elements
+    return _format_lb_break_no(raw)
+
+
+def _format_lb_break_no(xml_string: str) -> str:
+    """
+    Post-process serialized XML to format <lb break="no"/> elements:
+    1. Remove whitespace (including newlines) before <lb ... break="no" .../>
+    2. Reorder attributes: break="no" first, then resp, then others,
+       then xml:id on a new indented line
+    """
+    # Match <lb .../> or <cb .../> elements that have break="no"
+    # Also capture any preceding whitespace
+    pattern = re.compile(
+        r'(\s*)'                     # preceding whitespace (group 1)
+        r'(<(?:lb|cb)\s)'            # tag opening (group 2)
+        r'([^>]*?)'                  # attributes (group 3)
+        r'(/>)',                     # self-close (group 4)
+    )
+
+    def _reformat_lb(match):
+        pre_ws = match.group(1)
+        tag_open = match.group(2)     # "<lb " or "<cb "
+        attrs_str = match.group(3)
+        close = match.group(4)
+
+        # Parse attributes from the string
+        attr_pattern = re.compile(r'(\S+)="([^"]*)"')
+        attrs = attr_pattern.findall(attrs_str)
+        attr_dict = {k: v for k, v in attrs}
+
+        # Only reformat if break="no" is present
+        if attr_dict.get("break") != "no":
+            return match.group(0)  # leave unchanged
+
+        # Remove preceding whitespace (concatenate lines)
+        pre_ws = ""
+
+        # Build attribute lines:
+        # Line 1: all attributes except xml:id
+        # Line 2 (indented): xml:id only
+        line1_attrs = ['break="no"']
+        for k, v in attrs:
+            if k in ("break", "xml:id"):
+                continue
+            line1_attrs.append(f'{k}="{v}"')
+
+        xml_id = attr_dict.get("xml:id")
+
+        # Build the formatted element
+        result = pre_ws + tag_open.rstrip() + " " + " ".join(line1_attrs)
+
+        if xml_id:
+            result += f'\n    xml:id="{xml_id}"'
+
+        return result + close
+
+    return pattern.sub(_reformat_lb, xml_string)
