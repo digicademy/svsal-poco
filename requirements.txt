@@ -1,4 +1,5 @@
 git+https://github.com/digicademy/svsal-poco@b110094
+flair
 spaces
 sentencepiece
 lxml
