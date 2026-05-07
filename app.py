@@ -25,6 +25,10 @@ from codecarbon import EmissionsTracker
 # in the space branch can be ignored.
 # ---------------------------------------------------------------------------
 from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_boundaries
+from boundary_classifier.boundary_detector import (
+    BoundaryDetector, create_boundary_detector,
+    CanineBoundaryDetector, FlairBoundaryDetector,
+)
 from data.data_utils import (
     ABBR_OPEN, ABBR_CLOSE, LINE_SEP, LINE_BREAK,
     CorpusLexicon,
@@ -44,6 +48,19 @@ EMISSIONS_FILE      = "inference_emissions.json"
 _UPLOAD_EVERY_N     = 10
 NONBREAKING_MARKER    = "¬"   # appended to lines where boundary classifier predicts nonbreaking
 
+# Boundary model options
+BOUNDARY_MODELS = {
+    "Canine (mpilhlt/canine-salamanca-boundary-classifier)": {
+        "repo": "mpilhlt/canine-salamanca-boundary-classifier",
+        "type": "canine",
+    },
+    "Flair (mschonhardt/latin-contextual-lb-detector)": {
+        "repo": "mschonhardt/latin-contextual-lb-detector",
+        "type": "flair",
+    },
+}
+DEFAULT_BOUNDARY_MODEL = "Canine (mpilhlt/canine-salamanca-boundary-classifier)"
+
 _models_loaded = False
 _load_error    = None
 _emissions_lock   = threading.Lock()           # thread-safe updates
@@ -55,6 +72,9 @@ boundary_tokenizer = None
 boundary_threshold = None
 byt5_model = None
 byt5_tokenizer = None
+
+# Boundary detectors (abstraction layer)
+boundary_detectors: dict[str, BoundaryDetector] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -211,24 +231,42 @@ def load_models():
     """
     global boundary_model, boundary_tokenizer, boundary_threshold
     global byt5_model, byt5_tokenizer
-    global _models_loaded, _load_error
+    global _models_loaded, _load_error, boundary_detectors
 
     try:
 
-        # --- Boundary classifier ---
+        # --- Boundary classifiers ---
 
-        boundary_tokenizer = CanineTokenizer.from_pretrained("google/canine-s")
-        boundary_model   = BoundaryClassifier(use_lexicon=False)
-        weights_path     = hf_hub_download(BOUNDARY_REPO, "best_model.pt")
-        boundary_model.load_state_dict(
-            torch.load(weights_path, map_location="cpu", weights_only=True)
-        )
-        boundary_model.eval()
+        # Canine detector (primary)
+        try:
+            canine_detector = create_boundary_detector(
+                model_type="canine",
+                model_path=BOUNDARY_REPO,
+            )
+            boundary_detectors["canine"] = canine_detector
+            # Also set legacy globals for backward compatibility with run_pipeline
+            boundary_model = canine_detector.model
+            boundary_tokenizer = canine_detector.tokenizer
+            boundary_threshold = canine_detector.get_default_threshold()
+            print(f"Canine boundary detector loaded from {BOUNDARY_REPO}")
+        except Exception as e:
+            print(f"Warning: Canine boundary detector failed to load: {e}")
 
-        threshold_path   = hf_hub_download(BOUNDARY_REPO, "threshold.json")
-        boundary_threshold = json.loads(
-            Path(threshold_path).read_text()
-        )["threshold"]
+        # Flair detector (optional — flair may not be installed)
+        try:
+            flair_info = BOUNDARY_MODELS[
+                "Flair (mschonhardt/latin-contextual-lb-detector)"
+            ]
+            flair_detector = create_boundary_detector(
+                model_type="flair",
+                model_name=flair_info["repo"],
+            )
+            boundary_detectors["flair"] = flair_detector
+            print(f"Flair boundary detector loaded from {flair_info['repo']}")
+        except ImportError:
+            print("Flair not installed — Flair boundary detector unavailable")
+        except Exception as e:
+            print(f"Warning: Flair boundary detector failed to load: {e}")
 
         # --- ByT5 ---
 
@@ -289,7 +327,7 @@ def load_models():
         if byt5_model is not None:
             byt5_model.eval()
 
-        if boundary_model and byt5_model:
+        if boundary_detectors and byt5_model:
             _models_loaded = True
 
     except Exception as e:
@@ -334,19 +372,47 @@ def lines_to_jsonl_rows(text: str) -> tuple[list[dict], dict[str, str]]:
 
     return rows, pre_annotated
 
-def classify_boundaries_only(text: str) -> str:
+def _resolve_text_input(text: str, file) -> str:
+    """Resolve input from textbox or uploaded file. File takes priority."""
+    if file is not None:
+        return Path(file.name if hasattr(file, 'name') else file).read_text(encoding="utf-8")
+    return text or ""
+
+
+def _get_detector(boundary_model_name: str) -> tuple[BoundaryDetector, str]:
+    """
+    Get the boundary detector for the selected model.
+    Returns (detector, model_type) or raises ValueError.
+    """
+    info = BOUNDARY_MODELS.get(boundary_model_name, {})
+    model_type = info.get("type", "canine")
+    detector = boundary_detectors.get(model_type)
+    if detector is None:
+        available = list(boundary_detectors.keys())
+        raise ValueError(
+            f"{model_type} boundary detector not available. "
+            f"Loaded detectors: {available}"
+        )
+    return detector, model_type
+
+
+def _run_boundary_detection(
+    rows: list[dict],
+    boundary_model_name: str,
+) -> list[dict]:
+    """Run boundary detection using the selected model."""
+    detector, _ = _get_detector(boundary_model_name)
+    threshold = detector.get_default_threshold()
+    return detector.predict_boundaries(rows, threshold=threshold)
+
+
+def classify_boundaries_only(text: str, boundary_model_name: str) -> str:
     """
     Run only the boundary classifier and return annotated text showing
     which line boundaries were detected as nonbreaking.
     """
-    rows   = lines_to_jsonl_rows(text)
-    result = predict_boundaries(
-        lines=rows,
-        model=boundary_model,
-        tokenizer=boundary_tokenizer,
-        threshold=boundary_threshold,
-        context_chars=40,
-    )
+    rows, _ = lines_to_jsonl_rows(text)
+    result = _run_boundary_detection(rows, boundary_model_name)
 
     lines      = [r["source_sic"] for r in result]
     nonbreaking = {r["id"] for r in result if r["predicted_nonbreaking_next_line"]}
@@ -360,7 +426,7 @@ def classify_boundaries_only(text: str) -> str:
             output_lines.append(line)
     return "\n".join(output_lines)
 
-def expand_text(text: str) -> tuple[str, str, str]:
+def expand_text(text: str, boundary_model_name: str = DEFAULT_BOUNDARY_MODEL) -> tuple[str, str, str]:
     """
     Run the full pipeline (boundary detection + abbreviation expansion)
     on plain text input.
@@ -371,6 +437,7 @@ def expand_text(text: str) -> tuple[str, str, str]:
         diff:       side-by-side original vs expanded for changed lines
     """
     rows, pre_annotated = lines_to_jsonl_rows(text)
+    detector, _ = _get_detector(boundary_model_name)
 
     # Write to temp file for run_pipeline
     with tempfile.NamedTemporaryFile(
@@ -386,14 +453,11 @@ def expand_text(text: str) -> tuple[str, str, str]:
         run_pipeline(
             input_path=input_path,
             output_path=output_path,
-            boundary_model=boundary_model,
-            boundary_tokenizer=boundary_tokenizer,
-            boundary_threshold=boundary_threshold,
+            boundary_detector=detector,
             pre_annotated_boundaries=pre_annotated,
             byt5_model=byt5_model,
             byt5_tokenizer=byt5_tokenizer,
             batch_size=16,
-            lang_prefix=False,
         )
 
         with open(output_path, encoding="utf-8") as f:
@@ -448,17 +512,24 @@ def expand_text(text: str) -> tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 
 @spaces.GPU(duration=120)
-def run_boundary_only(text: str) -> tuple[str, str]:
-    if boundary_model is None:
-        return "Boundary model not available — cannot run boundary detection.", ""
+def run_boundary_only(text: str, file, boundary_model_name: str) -> tuple[str, str]:
+    if not boundary_detectors:
+        return "No boundary models available — cannot run boundary detection.", ""
+
+    text = _resolve_text_input(text, file)
     if not text.strip():
-        return "Please enter some text.", ""
+        return "Please enter some text or upload a file.", ""
+
+    try:
+        _get_detector(boundary_model_name)
+    except ValueError as e:
+        return str(e), ""
 
     tracker, mode = make_emissions_tracker()
     if tracker:
         tracker.start()
 
-    result     = classify_boundaries_only(text)
+    result     = classify_boundaries_only(text, boundary_model_name)
     request_kg = tracker.stop() if tracker else 0.0
     if request_kg is None:
         request_kg = 0.0
@@ -470,17 +541,24 @@ def run_boundary_only(text: str) -> tuple[str, str]:
 
 
 @spaces.GPU(duration=120)
-def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
+def run_full_pipeline(text: str, file, boundary_model_name: str) -> tuple[str, str, str, str]:
     if byt5_model is None:
         return "ByT5 model not yet trained — abbreviation expansion unavailable.", "", "", ""
+
+    text = _resolve_text_input(text, file)
     if not text.strip():
-        return "Please enter some text.", "", "", ""
+        return "Please enter some text or upload a file.", "", "", ""
+
+    try:
+        _get_detector(boundary_model_name)
+    except ValueError as e:
+        return str(e), "", "", ""
 
     tracker, mode = make_emissions_tracker()
     if tracker:
         tracker.start()
 
-    expanded, boundaries, diff = expand_text(text)
+    expanded, boundaries, diff = expand_text(text, boundary_model_name)
     request_kg = tracker.stop() if tracker else 0.0
     if request_kg is None:
         request_kg = 0.0
@@ -495,11 +573,12 @@ def run_full_pipeline(text: str) -> tuple[str, str, str, str]:
 # ---------------------------------------------------------------------------
 
 @spaces.GPU(duration=120)
-def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
+def run_xml_pipeline(xml_string: str, file, boundary_model_name: str) -> tuple[str, str]:
     """
     Process TEI XML: expand abbreviations and mark boundaries.
     Returns (expanded_xml, status_message).
     """
+    xml_string = _resolve_text_input(xml_string, file)
     if not xml_string or not xml_string.strip():
         return "", "No input provided."
 
@@ -507,6 +586,15 @@ def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
         return "", f"Models not loaded: {_load_error}"
 
     try:
+        _, model_type = _get_detector(boundary_model_name)
+    except ValueError as e:
+        return "", str(e)
+
+    boundary_info = BOUNDARY_MODELS.get(boundary_model_name, {})
+
+    try:
+        detector, _ = _get_detector(boundary_model_name)
+
         def pipeline_fn(line_rows, pre_annotated=None):
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
@@ -521,9 +609,7 @@ def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
                 run_pipeline(
                     input_path=input_path,
                     output_path=output_path,
-                    boundary_model=boundary_model,
-                    boundary_tokenizer=boundary_tokenizer,
-                    boundary_threshold=boundary_threshold,
+                    boundary_detector=detector,
                     byt5_model=byt5_model,
                     byt5_tokenizer=byt5_tokenizer,
                     pre_annotated_boundaries=pre_annotated,
@@ -532,13 +618,6 @@ def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
 
                 with open(output_path, encoding="utf-8") as f:
                     out_rows = [json.loads(l) for l in f if l.strip()]
-
-                # Debug: print what the pipeline produced
-                for r in out_rows[:5]:
-                    print(f"  line {r['id']}: src='{r['source_sic'][:50]}' "
-                          f"exp='{r.get('expanded_text', '???')[:50]}' "
-                          f"boundary='{r.get('predicted_nonbreaking_next_line', '')}'",
-                          flush=True)
 
                 expanded_dict = {
                     r["id"]: r.get("expanded_text", r["source_sic"])
@@ -557,9 +636,14 @@ def run_xml_pipeline(xml_string: str) -> tuple[str, str]:
                 if os.path.exists(output_path):
                     os.unlink(output_path)
 
-        result_xml = process_tei_xml(xml_string, pipeline_fn)
+        result_xml = process_tei_xml(
+            xml_string,
+            pipeline_fn,
+            expansion_model=BYT5_REPO.split("/")[-1],
+            boundary_model=boundary_info.get("repo", "").split("/")[-1],
+        )
 
-        n_choices = result_xml.count("<choice>") - xml_string.count("<choice>")
+        n_choices = result_xml.count("<choice") - xml_string.count("<choice")
         n_breaks = result_xml.count('break="no"') - xml_string.count('break="no"')
 
         status = (
@@ -613,6 +697,14 @@ with gr.Blocks(
     if not _models_loaded:
         gr.Markdown(f"⚠️ **Model loading failed:** {_load_error}")
 
+    # --- Boundary model selector (applies to all tabs) ---
+    boundary_model_selector = gr.Dropdown(
+        choices=list(BOUNDARY_MODELS.keys()),
+        value=DEFAULT_BOUNDARY_MODEL,
+        label="Boundary detection model",
+        info="Select the line boundary classifier to use for all tabs.",
+    )
+
     with gr.Tabs():
 
         # ---------------------------------------------------------------
@@ -632,6 +724,10 @@ with gr.Blocks(
                         label="Input text (one line per line)",
                         placeholder="Paste transcribed early modern text here...",
                         value=EXAMPLE_TEXT,
+                    )
+                    full_file = gr.File(
+                        label="Or upload a text file",
+                        file_types=[".txt"],
                     )
                     full_btn = gr.Button(
                         "Process", variant="primary", size="lg"
@@ -663,7 +759,7 @@ with gr.Blocks(
 
             full_btn.click(
                 fn=run_full_pipeline,
-                inputs=full_input,
+                inputs=[full_input, full_file, boundary_model_selector],
                 outputs=[
                     full_output_expanded,
                     full_output_boundaries,
@@ -677,7 +773,7 @@ with gr.Blocks(
         # ---------------------------------------------------------------
         with gr.Tab("Boundary detection only"):
             gr.Markdown(
-                "Runs only the Canine boundary classifier. "
+                "Runs only the boundary classifier. "
                 "Lines marked with ¬ are identified as nonbreaking — "
                 "the word at the end of that line continues on the next line."
             )
@@ -689,6 +785,10 @@ with gr.Blocks(
                         label="Input text",
                         placeholder="Paste transcribed text here...",
                         value=EXAMPLE_TEXT,
+                    )
+                    boundary_file = gr.File(
+                        label="Or upload a text file",
+                        file_types=[".txt"],
                     )
                     boundary_btn = gr.Button(
                         "Detect boundaries", variant="primary"
@@ -707,17 +807,17 @@ with gr.Blocks(
 
             boundary_btn.click(
                 fn=run_boundary_only,
-                inputs=boundary_input,
+                inputs=[boundary_input, boundary_file, boundary_model_selector],
                 outputs=[boundary_output, boundary_carbon],
             )
 
         # ---------------------------------------------------------------
-        # Tab 3: XML processing (placeholder)
+        # Tab 3: XML processing
         # ---------------------------------------------------------------
         with gr.Tab("TEI XML processing"):
             gr.Markdown(
                 "### TEI XML abbreviation expansion\n\n"
-                "Paste a TEI XML fragment. The pipeline will expand "
+                "Paste a TEI XML fragment or upload an XML file. The pipeline will expand "
                 "abbreviations (wrapping them in "
                 "`<choice><abbr>…</abbr><expan>…</expan></choice>`) "
                 "and mark nonbreaking line boundaries with `break=\"no\"`."
@@ -729,6 +829,10 @@ with gr.Blocks(
                         label="Input TEI XML",
                         lines=15,
                         placeholder="Paste TEI XML here...",
+                    )
+                    xml_file = gr.File(
+                        label="Or upload a TEI XML file",
+                        file_types=[".xml"],
                     )
                     xml_btn = gr.Button(
                         "Process XML",
@@ -749,7 +853,7 @@ with gr.Blocks(
 
             xml_btn.click(
                 fn=run_xml_pipeline,
-                inputs=xml_input,
+                inputs=[xml_input, xml_file, boundary_model_selector],
                 outputs=[xml_output, xml_status],
             )
 
