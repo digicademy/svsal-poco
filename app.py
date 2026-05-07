@@ -15,7 +15,7 @@ from pathlib import Path
 import gradio as gr
 import spaces
 import torch
-from huggingface_hub import HfApi, hf_hub_download, login, RepoFolder, snapshot_download
+from huggingface_hub import HfApi, hf_hub_download, login, snapshot_download
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 from codecarbon import EmissionsTracker
 
@@ -271,7 +271,7 @@ def load_models():
                     ))
                     checkpoint_dirs = sorted(
                         [e.path for e in entries
-                        if isinstance(e, RepoFolder)
+                        if hasattr(e, "tree_id")               # <-- True for RepoFolder, False for RepoFile
                         and e.path.startswith("checkpoints/checkpoint-")],
                         key=lambda x: int(x.rsplit("-", 1)[-1]),
                     )
