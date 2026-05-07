@@ -40,6 +40,7 @@ import torch
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 
 from boundary_classifier.boundary_classifier import BoundaryClassifier
+from boundary_classifier.boundary_detector import create_boundary_detector
 from infer import run_pipeline
 from tei.tei_roundtrip import process_tei_xml
 
@@ -65,8 +66,7 @@ def load_models(
     Returns:
         Tuple of (boundary_detector, boundary_threshold, byt5_model, byt5_tokenizer)
     """
-    from boundary_detector import create_boundary_detector
-    
+
     # Load boundary detector
     if boundary_model_type == "canine":
         # Use boundary_model_dir or boundary_model_name (both work for canine)

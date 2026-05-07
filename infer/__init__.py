@@ -21,7 +21,7 @@ from collections import defaultdict
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 
 from data.data_utils import load_and_sort_lines, CorpusLexicon, ABBR_OPEN, ABBR_CLOSE, LINE_BREAK, LINE_SEP
-from boundary_detector import BoundaryDetector, create_boundary_detector
+from boundary_classifier.boundary_detector import BoundaryDetector, create_boundary_detector
 from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_boundaries
 
 
