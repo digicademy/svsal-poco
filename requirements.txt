@@ -1,7 +1,7 @@
-git+https://github.com/digicademy/svsal-poco@b110094
+git+https://github.com/digicademy/svsal-poco@09c7721
 flair
 spaces
 sentencepiece
 lxml
-torch
+torch==2.8.0
 codecarbon
