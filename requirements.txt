@@ -3,5 +3,5 @@ flair
 spaces
 sentencepiece
 lxml
-torch==2.8.0
-codecarbon>=2.3.0
+torch
+codecarbon
