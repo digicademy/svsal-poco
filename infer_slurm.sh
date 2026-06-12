@@ -46,9 +46,9 @@
 #SBATCH --nodes=1
 
 # --- Change the following for testing the workflow/GPU setup ---
-#SBATCH --time=08:00:00
-#SBATCH --partition=apu
-# #SBATCH --partition=apudev      # apudev: for testing, 1 node with 2 MI300, 15 min. walltime
+#SBATCH --time=00:15:00
+# #SBATCH --partition=apu
+#SBATCH --partition=apudev      # apudev: for testing, 1 node with 2 MI300, 15 min. walltime
 
 # --- VIPER default case: use a single APU on a shared node ---
 #SBATCH --gres=gpu:1
@@ -94,6 +94,10 @@ EXTENSIONS=""
 # within the offline HF cache).
 # Use $PTMP_BASE/output/final_model if you want the freshly trained checkpoint.
 BYT5_MODEL_DIR="$PTMP_BASE/models/byt5-salamanca-abbr"
+
+# HF model identifier for the abbreviation (BYT5) model (only used when BYT5_MODEL_DIR
+# is empty, i.e. the model is loaded from the local HF cache).
+BYT5_MODEL_NAME=""
 
 # Local boundary model directory.
 # For a canine model it must contain best_model.pt and threshold.json.
@@ -181,15 +185,15 @@ echo "---"
 
 # Boundary model: --boundary-model-dir and --boundary-model-name are mutually
 # exclusive in infer_local_batch.sh, so build the argument here.
-BOUNDARY_ARGS=()
-if [[ -n "$BOUNDARY_MODEL_DIR" ]]; then
-    BOUNDARY_ARGS+=(--boundary-model-dir "$BOUNDARY_MODEL_DIR")
-elif [[ -n "$BOUNDARY_MODEL_NAME" ]]; then
-    BOUNDARY_ARGS+=(--boundary-model-name "$BOUNDARY_MODEL_NAME")
-else
-    echo "ERROR: Set either BOUNDARY_MODEL_DIR or BOUNDARY_MODEL_NAME." >&2
-    exit 1
-fi
+# BOUNDARY_ARGS=()
+# if [[ -n "$BOUNDARY_MODEL_DIR" ]]; then
+#    BOUNDARY_ARGS+=(--boundary-model-dir "$BOUNDARY_MODEL_DIR")
+# elif [[ -n "$BOUNDARY_MODEL_NAME" ]]; then
+#    BOUNDARY_ARGS+=(--boundary-model-name "$BOUNDARY_MODEL_NAME")
+# else
+#    echo "ERROR: Set either BOUNDARY_MODEL_DIR or BOUNDARY_MODEL_NAME." >&2
+#    exit 1
+# fi
 
 # Collect optional flags.
 EXTRA_ARGS=()
@@ -202,8 +206,9 @@ srun bash "$REPO_DIR/infer_local_batch.sh" \
     --input-dir     "$INPUT_DIR" \
     --output-dir    "$OUTPUT_DIR" \
     --byt5-model-dir "$BYT5_MODEL_DIR" \
+    --boundary-model-dir "$BOUNDARY_MODEL_DIR" \
     --batch-size    "$BATCH_SIZE" \
-    "${BOUNDARY_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
+#    "${BOUNDARY_ARGS[@]}" \
 
 echo "Inference job $SLURM_JOB_ID finished at $(date)"

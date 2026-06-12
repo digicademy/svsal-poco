@@ -16,6 +16,7 @@ BOUNDARY_MODEL_DIR=""
 BOUNDARY_MODEL_NAME=""
 BOUNDARY_MODEL_TYPE="canine"
 BYT5_MODEL_DIR=""
+BYT5_MODEL_NAME=""
 WRAPPER_SCRIPT=""
 BATCH_SIZE="16"
 LANG_PREFIX="0"
@@ -106,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --boundary-model-name) BOUNDARY_MODEL_NAME="${2:-}"; shift 2 ;;
     --boundary-model-type) BOUNDARY_MODEL_TYPE="${2:-}"; shift 2 ;;
     --byt5-model-dir) BYT5_MODEL_DIR="${2:-}"; shift 2 ;;
+    --byt5-model-name) BYT5_MODEL_NAME="${2:-}"; shift 2 ;;
     --wrapper) WRAPPER_SCRIPT="${2:-}"; shift 2 ;;
     --batch-size) BATCH_SIZE="${2:-}"; shift 2 ;;
     --lang-prefix) LANG_PREFIX="1"; shift 1 ;;
@@ -121,12 +123,17 @@ done
 [[ -n "$MODE" ]] || die "--mode is required"
 [[ -n "$INPUT_DIR" ]] || die "--input-dir is required"
 [[ -n "$OUTPUT_DIR" ]] || die "--output-dir is required"
-[[ -n "$BYT5_MODEL_DIR" ]] || die "--byt5-model-dir is required"
+# [[ -n "$BYT5_MODEL_DIR" ]] || die "--byt5-model-dir is required"
 
 [[ -n "$BOUNDARY_MODEL_DIR" && -n "$BOUNDARY_MODEL_NAME" ]] \
   && die "boundary model must be specified with --boundary-model-dir or --boundary-model-name"
 [[ "$BOUNDARY_MODEL_DIR" != "" && "$BOUNDARY_MODEL_NAME" != "" ]] \
   && die "boundary model must be specified with either --boundary-model-dir or --boundary-model-name, not both"
+
+[[ -n "$BYT5_MODEL_DIR" && -n "$BYT5_MODEL_NAME" ]] \
+  && die "abbrev model must be specified with --byt5-model-dir or --byt5-model-name"
+[[ "$BYT5_MODEL_DIR" != "" && "$BYT5_MODEL_NAME" != "" ]] \
+  && die "abbrev model must be specified with either --byt5-model-dir or --byt5-model-name, not both"
 
 [[ "$MODE" == "text" || "$MODE" == "xml" || "$MODE" == "jsonl" ]] \
   || die "--mode must be text|xml|jsonl"
@@ -144,10 +151,15 @@ fi
 [[ -f "$WRAPPER_SCRIPT" ]] || die "Wrapper script not found: $WRAPPER_SCRIPT"
 
 # strict model checks
-[[ "$BOUNDARY_MODEL_DIR" != "" && ! -d "$BOUNDARY_MODEL_DIR" ]] && die "Boundary model dir not found: $BOUNDARY_MODEL_DIR"
+# ls -la /ptmp/awagner/byt5-salamanca/models/canine-salamanca-boundary-classifier
+ls -la $BOUNDARY_MODEL_DIR
+                                      [[ "$BOUNDARY_MODEL_DIR" != "" && ! -d "$BOUNDARY_MODEL_DIR" ]]                     && die "Boundary model dir not found: $BOUNDARY_MODEL_DIR"
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/best_model.pt" ]]     && die "Missing ${BOUNDARY_MODEL_DIR}/best_model.pt"
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/threshold.json" ]]    && die "Missing ${BOUNDARY_MODEL_DIR}/threshold.json"
 [[ "$BOUNDARY_MODEL_TYPE" == "flair"  && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/pytorch_model.bin" ]] && die "Missing ${BOUNDARY_MODEL_DIR}/pytorch_model.bin"
+
+[[ "$BYT5_MODEL_DIR" != "" && ! -d "$BYT5_MODEL_DIR" ]] && die "Abbrev/BYT5 model dir not found: $BYT5_MODEL_DIR"
+[[ "$BYT5_MODEL_DIR" != "" && ! -f "${BYT5_MODEL_DIR}/final_model/model.safetensors" ]]     && die "Missing ${BYT5_MODEL_DIR}/final_model/model.safetensors"
 
 # Resolve extensions
 if [[ -z "$EXTENSIONS" ]]; then
@@ -208,6 +220,18 @@ for in_file in "${FILES[@]}"; do
     out_file="${out_file%.*}.jsonl"
   fi
 
+  if [[ "$BOUNDARY_MODEL_DIR" != "" ]]; then
+	  BOUNDARY_MODEL="--boundary-model-dir \"$BOUNDARY_MODEL_DIR\""
+  else
+	  BOUNDARY_MODEL="--boundary-model-name \"$BOUNDARY_MODEL_NAME\""
+  fi
+ 
+  if [[ "$BYT5_MODEL_DIR" != "" ]]; then
+	  BYT5_MODEL="--byt5-model-dir \"$BYT5_MODEL_DIR\""
+  else
+	  BYT5_MODEL="--byt5-model-name \"$BYT5_MODEL_NAME\""
+  fi
+ 
   mkdir -p "$(dirname "$out_file")"
 
   cmd=(
@@ -215,10 +239,9 @@ for in_file in "${FILES[@]}"; do
     --mode "$MODE"
     --input "$in_file"
     --output "$out_file"
-    --boundary-model-dir "$BOUNDARY_MODEL_DIR"
-    --boundary-model-name "$BOUNDARY_MODEL_NAME"
     --boundary-model-type "$BOUNDARY_MODEL_TYPE"
-    --byt5-model-dir "$BYT5_MODEL_DIR"
+    $BOUNDARY_MODEL
+    $BYT5_MODEL
     --batch-size "$BATCH_SIZE"
     --text-output "$TEXT_OUTPUT"
     --python "$PYTHON_BIN"
