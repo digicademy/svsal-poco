@@ -37,11 +37,10 @@ import tempfile
 from pathlib import Path
 
 import torch
-from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
+from transformers import T5ForConditionalGeneration
 
-from boundary_classifier.boundary_classifier import BoundaryClassifier
 from boundary_classifier.boundary_detector import create_boundary_detector
-from infer import run_pipeline
+from infer import load_byt5_tokenizer, run_pipeline
 from tei.tei_roundtrip import process_tei_xml
 
 
@@ -91,7 +90,7 @@ def load_models(
         raise ValueError(f"Unknown boundary_model_type: {boundary_model_type}")
 
     # ByT5 model/tokenizer from local path (offline-safe)
-    byt5_tokenizer = AutoTokenizer.from_pretrained(
+    byt5_tokenizer = load_byt5_tokenizer(
         byt5_model_dir,
         local_files_only=True,
     )

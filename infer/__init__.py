@@ -25,6 +25,20 @@ from boundary_classifier.boundary_detector import BoundaryDetector, create_bound
 from boundary_classifier.boundary_classifier import BoundaryClassifier, predict_boundaries
 
 
+def load_byt5_tokenizer(model_id_or_path: str, **kwargs):
+    try:
+        return AutoTokenizer.from_pretrained(model_id_or_path, **kwargs)
+    except AttributeError as exc:
+        if "'list' object has no attribute 'keys'" not in str(exc):
+            raise
+        print("Retrying ByT5 tokenizer load with normalized extra_special_tokens...")
+        return AutoTokenizer.from_pretrained(
+            model_id_or_path,
+            extra_special_tokens={},
+            **kwargs,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Sliding window construction
 # ---------------------------------------------------------------------------
@@ -293,7 +307,7 @@ def run_pipeline(
         if byt5_model_dir is None:
             raise ValueError("Provide byt5_model or byt5_model_dir")
         print("Loading ByT5...")
-        byt5_tokenizer = AutoTokenizer.from_pretrained(byt5_model_dir)
+        byt5_tokenizer = load_byt5_tokenizer(byt5_model_dir)
         byt5_model = T5ForConditionalGeneration.from_pretrained(byt5_model_dir)
         print(f"ByT5 model loaded from {byt5_model_dir}")
 
