@@ -37,9 +37,8 @@ import tempfile
 from pathlib import Path
 
 import torch
-from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
+from transformers import T5ForConditionalGeneration
 
-from boundary_classifier.boundary_classifier import BoundaryClassifier
 from boundary_classifier.boundary_detector import create_boundary_detector
 from infer import load_byt5_tokenizer, run_pipeline
 from tei.tei_roundtrip import process_tei_xml
