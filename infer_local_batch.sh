@@ -151,14 +151,14 @@ fi
 [[ -f "$WRAPPER_SCRIPT" ]] || die "Wrapper script not found: $WRAPPER_SCRIPT"
 
 # strict model checks
-# ls -la /ptmp/awagner/byt5-salamanca/models/canine-salamanca-boundary-classifier
-ls -la $BOUNDARY_MODEL_DIR
-                                      [[ "$BOUNDARY_MODEL_DIR" != "" && ! -d "$BOUNDARY_MODEL_DIR" ]]                     && die "Boundary model dir not found: $BOUNDARY_MODEL_DIR"
+# ls -la $BOUNDARY_MODEL_DIR
+
+                                      [[ "$BOUNDARY_MODEL_DIR" != "" && ! -d "${BOUNDARY_MODEL_DIR}" ]]                   && die "Boundary model dir not found: ${BOUNDARY_MODEL_DIR}"
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/best_model.pt" ]]     && die "Missing ${BOUNDARY_MODEL_DIR}/best_model.pt"
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/threshold.json" ]]    && die "Missing ${BOUNDARY_MODEL_DIR}/threshold.json"
 [[ "$BOUNDARY_MODEL_TYPE" == "flair"  && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/pytorch_model.bin" ]] && die "Missing ${BOUNDARY_MODEL_DIR}/pytorch_model.bin"
 
-[[ "$BYT5_MODEL_DIR" != "" && ! -d "$BYT5_MODEL_DIR" ]]                                     && die "Abbrev/BYT5 model dir not found: $BYT5_MODEL_DIR"
+[[ "$BYT5_MODEL_DIR" != "" && ! -d "$BYT5_MODEL_DIR" ]]                                     && die "Abbrev/BYT5 model dir not found: ${BYT5_MODEL_DIR}"
 [[ "$BYT5_MODEL_DIR" != "" && ! -f "${BYT5_MODEL_DIR}/final_model/model.safetensors" ]]     && die "Missing ${BYT5_MODEL_DIR}/final_model/model.safetensors"
 
 # Resolve extensions
@@ -221,27 +221,27 @@ for in_file in "${FILES[@]}"; do
   fi
 
   if [[ "$BOUNDARY_MODEL_DIR" != "" ]]; then
-	  BOUNDARY_MODEL="--boundary-model-dir \"$BOUNDARY_MODEL_DIR\""
+	  BOUNDARY_MODEL=(--boundary-model-dir "$BOUNDARY_MODEL_DIR")
   else
-	  BOUNDARY_MODEL="--boundary-model-name \"$BOUNDARY_MODEL_NAME\""
+	  BOUNDARY_MODEL=(--boundary-model-name "$BOUNDARY_MODEL_NAME")
   fi
  
   if [[ "$BYT5_MODEL_DIR" != "" ]]; then
-	  BYT5_MODEL="--byt5-model-dir \"$BYT5_MODEL_DIR\""
+	  BYT5_MODEL=(--byt5-model-dir "$BYT5_MODEL_DIR")
   else
-	  BYT5_MODEL="--byt5-model-name \"$BYT5_MODEL_NAME\""
+	  BYT5_MODEL=(--byt5-model-name "$BYT5_MODEL_NAME")
   fi
  
   mkdir -p "$(dirname "$out_file")"
 
   cmd=(
-    "$WRAPPER_SCRIPT"
+    $WRAPPER_SCRIPT
     --mode "$MODE"
     --input "$in_file"
     --output "$out_file"
     --boundary-model-type "$BOUNDARY_MODEL_TYPE"
-    $BOUNDARY_MODEL
-    $BYT5_MODEL
+    "${BOUNDARY_MODEL[@]}"
+    "${BYT5_MODEL[@]}"
     --batch-size "$BATCH_SIZE"
     --text-output "$TEXT_OUTPUT"
     --python "$PYTHON_BIN"

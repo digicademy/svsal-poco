@@ -25,6 +25,7 @@ BOUNDARY_MODEL_DIR=""
 BOUNDARY_MODEL_NAME=""
 BOUNDARY_MODEL_TYPE="canine"
 BYT5_MODEL_DIR=""
+BYT5_MODEL_NAME=""
 BATCH_SIZE="16"
 LANG_PREFIX="0"
 TEXT_OUTPUT="text"   # for --mode text: text|jsonl
@@ -112,6 +113,7 @@ while [[ $# -gt 0 ]]; do
     --boundary-model-name) BOUNDARY_MODEL_NAME="${2:-}"; shift 2 ;;
     --boundary-model-type) BOUNDARY_MODEL_TYPE="${2:-}"; shift 2 ;;
     --byt5-model-dir) BYT5_MODEL_DIR="${2:-}"; shift 2 ;;
+    --byt5-model-name) BYT5_MODEL_NAME="${2:-}"; shift 2 ;;
     --batch-size) BATCH_SIZE="${2:-}"; shift 2 ;;
     --lang-prefix) LANG_PREFIX="1"; shift 1 ;;
     --text-output) TEXT_OUTPUT="${2:-}"; shift 2 ;;
@@ -128,12 +130,18 @@ done
 [[ -n "$MODE" ]] || die "--mode is required"
 [[ -n "$INPUT_FILE" ]] || die "--input is required"
 [[ -n "$OUTPUT_FILE" ]] || die "--output is required"
-[[ -n "$BYT5_MODEL_DIR" ]] || die "--byt5-model-dir is required"
+# [[ -n "$BYT5_MODEL_DIR" ]] || die "--byt5-model-dir is required"
 
 [[ -n "$BOUNDARY_MODEL_DIR" && -n "$BOUNDARY_MODEL_NAME" ]] \
   && die "boundary model must be specified with --boundary-model-dir or --boundary-model-name"
 [[ "$BOUNDARY_MODEL_DIR" != "" && "$BOUNDARY_MODEL_NAME" != "" ]] \
   && die "boundary model must be specified with either --boundary-model-dir or --boundary-model-name, not both"
+
+[[ -n "$BYT5_MODEL_DIR" && -n "$BYT5_MODEL_NAME" ]] \
+  && die "abbrev model must be specified with --byt5-model-dir or --byt5-model-name"
+[[ "$BYT5_MODEL_DIR" != "" && "$BYT5_MODEL_NAME" != "" ]] \
+  && die "abbrev model must be specified with either --byt5-model-dir or --byt5-model-name, not both"
+
 
 [[ "$MODE" == "text" || "$MODE" == "jsonl" || "$MODE" == "xml" ]] \
   || die "--mode must be one of: text, jsonl, xml"
@@ -145,14 +153,31 @@ done
 [[ -f "$PY_SCRIPT" ]] || die "Python handler not found: $PY_SCRIPT"
 
 # boundary dir checks (strict)
-[[ "$BOUNDARY_MODEL_DIR" != "" && ! -d "$BOUNDARY_MODEL_DIR" ]] && die "Boundary model dir not found: $BOUNDARY_MODEL_DIR"
+                                      [[ "$BOUNDARY_MODEL_DIR" != "" && ! -d ${BOUNDARY_MODEL_DIR} ]]                   && die "Boundary o2model dir not found: $BOUNDARY_MODEL_DIR"
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/best_model.pt" ]]     && die "Missing ${BOUNDARY_MODEL_DIR}/best_model.pt"
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/threshold.json" ]]    && die "Missing ${BOUNDARY_MODEL_DIR}/threshold.json"
-[[ "$BOUNDARY_MODEL_TYPE" == "flair"  && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/pytorch_model.bin" ]] && die "Missing ${BOUNDARY_MODEL_DIR}/pytorch_model.bin"
+[[ "$BOUNDARY_MODEL_TYPE" == "flair"  && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/pytorch_model.bin" ]] && die "Missing $BOUNDARY_MODEL_DIR/pytorch_model.bin"
+
+[[ "$BYT5_MODEL_DIR" != "" && ! -d "$BYT5_MODEL_DIR" ]]                                     && die "Abbrev/BYT5 model dir not found: ${BYT5_MODEL_DIR}"
+[[ "$BYT5_MODEL_DIR" != "" && ! -f "${BYT5_MODEL_DIR}/final_model/model.safetensors" ]]     && die "Missing ${BYT5_MODEL_DIR}/final_model/model.safetensors"
+
 
 # output directory
 OUT_DIR="$(dirname "$OUTPUT_FILE")"
 mkdir -p "$OUT_DIR"
+
+if [[ "$BOUNDARY_MODEL_DIR" != "" ]]; then
+    BOUNDARY_MODEL=(--boundary-model-dir "$BOUNDARY_MODEL_DIR")
+else
+    BOUNDARY_MODEL=(--boundary-model-name "$BOUNDARY_MODEL_NAME")
+fi
+ 
+if [[ "$BYT5_MODEL_DIR" != "" ]]; then
+    BYT5_MODEL=(--byt5-model-dir "$BYT5_MODEL_DIR")
+else
+    BYT5_MODEL=(--byt5-model-name "$BYT5_MODEL_NAME")
+fi
+ 
 
 # ------------------------
 # Build command
@@ -162,11 +187,10 @@ CMD=(
   --mode "$MODE"
   --input-file "$INPUT_FILE"
   --output-file "$OUTPUT_FILE"
-  --boundary-model-dir "$BOUNDARY_MODEL_DIR"
-  --boundary-model-name "$BOUNDARY_MODEL_NAME"
-  --boundary-model-type "$BOUNDARY_MODEL_TYPE"
-  --byt5-model-dir "$BYT5_MODEL_DIR"
   --batch-size "$BATCH_SIZE"
+  --boundary-model-type "$BOUNDARY_MODEL_TYPE"
+  "${BOUNDARY_MODEL[@]}"
+  "${BYT5_MODEL[@]}"
 )
 
 if [[ "$LANG_PREFIX" == "1" ]]; then
