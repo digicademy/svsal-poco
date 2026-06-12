@@ -158,7 +158,7 @@ ls -la $BOUNDARY_MODEL_DIR
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/threshold.json" ]]    && die "Missing ${BOUNDARY_MODEL_DIR}/threshold.json"
 [[ "$BOUNDARY_MODEL_TYPE" == "flair"  && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/pytorch_model.bin" ]] && die "Missing ${BOUNDARY_MODEL_DIR}/pytorch_model.bin"
 
-[[ "$BYT5_MODEL_DIR" != "" && ! -d "$BYT5_MODEL_DIR" ]] && die "Abbrev/BYT5 model dir not found: $BYT5_MODEL_DIR"
+[[ "$BYT5_MODEL_DIR" != "" && ! -d "$BYT5_MODEL_DIR" ]]                                     && die "Abbrev/BYT5 model dir not found: $BYT5_MODEL_DIR"
 [[ "$BYT5_MODEL_DIR" != "" && ! -f "${BYT5_MODEL_DIR}/final_model/model.safetensors" ]]     && die "Missing ${BYT5_MODEL_DIR}/final_model/model.safetensors"
 
 # Resolve extensions

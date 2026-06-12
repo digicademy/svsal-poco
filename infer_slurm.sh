@@ -102,14 +102,15 @@ BYT5_MODEL_NAME=""
 # Local boundary model directory.
 # For a canine model it must contain best_model.pt and threshold.json.
 # Set to "" and use BOUNDARY_MODEL_NAME instead to load from the HF cache.
-BOUNDARY_MODEL_DIR="$PTMP_BASE/models/canine-salamanca-boundary-classifier"
+# BOUNDARY_MODEL_DIR="$PTMP_BASE/models/canine-salamanca-boundary-classifier"
+BOUNDARY_MODEL_DIR="$PTMP_BASE/models/latin-contextual-lb-detector"
 
 # HF model identifier for the boundary model (only used when BOUNDARY_MODEL_DIR
 # is empty, i.e. the model is loaded from the local HF cache).
 BOUNDARY_MODEL_NAME=""
 
 # Boundary model type: canine | flair
-BOUNDARY_MODEL_TYPE="canine"
+BOUNDARY_MODEL_TYPE="flair"
 
 # --- Inference settings ------------------------------------
 # Per-call batch size forwarded to infer_handler.py.
@@ -185,15 +186,26 @@ echo "---"
 
 # Boundary model: --boundary-model-dir and --boundary-model-name are mutually
 # exclusive in infer_local_batch.sh, so build the argument here.
-# BOUNDARY_ARGS=()
-# if [[ -n "$BOUNDARY_MODEL_DIR" ]]; then
-#    BOUNDARY_ARGS+=(--boundary-model-dir "$BOUNDARY_MODEL_DIR")
-# elif [[ -n "$BOUNDARY_MODEL_NAME" ]]; then
-#    BOUNDARY_ARGS+=(--boundary-model-name "$BOUNDARY_MODEL_NAME")
-# else
-#    echo "ERROR: Set either BOUNDARY_MODEL_DIR or BOUNDARY_MODEL_NAME." >&2
-#    exit 1
-# fi
+BOUNDARY_ARGS=()
+if [[ -n "$BOUNDARY_MODEL_DIR" ]]; then
+    BOUNDARY_ARGS+=(--boundary-model-dir "$BOUNDARY_MODEL_DIR")
+elif [[ -n "$BOUNDARY_MODEL_NAME" ]]; then
+    BOUNDARY_ARGS+=(--boundary-model-name "$BOUNDARY_MODEL_NAME")
+else
+    echo "ERROR: Set either BOUNDARY_MODEL_DIR or BOUNDARY_MODEL_NAME." >&2
+    exit 1
+fi
+
+# Same for abbreviation/BYT5 model...
+BYT5_ARGS=()
+if [[ -n "$BYT5_MODEL_DIR" ]]; then
+    BYT5_ARGS+=(--byt5-model-dir "$BYT5_MODEL_DIR")
+elif [[ -n "$BYT5_MODEL_NAME" ]]; then
+    BYT5_ARGS+=(--byt5-model-name "$BYT5_MODEL_NAME")
+else
+    echo "ERROR: Set either BYT5_MODEL_DIR or BYT5_MODEL_NAME." >&2
+    exit 1
+fi
 
 # Collect optional flags.
 EXTRA_ARGS=()
@@ -205,10 +217,9 @@ srun bash "$REPO_DIR/infer_local_batch.sh" \
     --mode          "$MODE" \
     --input-dir     "$INPUT_DIR" \
     --output-dir    "$OUTPUT_DIR" \
-    --byt5-model-dir "$BYT5_MODEL_DIR" \
-    --boundary-model-dir "$BOUNDARY_MODEL_DIR" \
     --batch-size    "$BATCH_SIZE" \
+    "${BOUNDARY_ARGS[@]}" \
+    "${BYT5_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
-#    "${BOUNDARY_ARGS[@]}" \
 
 echo "Inference job $SLURM_JOB_ID finished at $(date)"
