@@ -90,11 +90,15 @@ def load_models(
     else:
         raise ValueError(f"Unknown boundary_model_type: {boundary_model_type}")
 
-    # ByT5 model (same tokenizer choice as app.py)
-    byt5_tokenizer = AutoTokenizer.from_pretrained("google/byt5-base")
+    # ByT5 model/tokenizer from local path (offline-safe)
+    byt5_tokenizer = AutoTokenizer.from_pretrained(
+        byt5_model_dir,
+        local_files_only=True,
+    )
     byt5_model = T5ForConditionalGeneration.from_pretrained(
         byt5_model_dir,
         tie_word_embeddings=False,
+        local_files_only=True,
     )
     byt5_model.eval()
 
