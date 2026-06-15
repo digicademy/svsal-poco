@@ -38,6 +38,7 @@ svsal-poco/
 │                              # that have been killed (due to timeout) after training
 │                              # has completed
 ├── infer_handler.py           # Python CLI for `text`, `jsonl`, and `xml` modes
+├── infer_hf.sh                # Batch inference job on Hugging Face Jobs
 ├── infer_local.sh             # File-to-file wrapper for single inputs
 ├── infer_local_batch.sh       # Recursive directory batch processing
 ├── prepare_viper.sh           # Script to download all online resources for HPC nodes
@@ -217,6 +218,35 @@ Notes:
   --output <output-file> \
   --boundary-model-dir ./canine-salamanca-boundary-classifier \
   --byt5-model-dir ./byt5-salamanca-abbr
+```
+
+### Inference on Hugging Face Jobs
+
+Use the provided job launcher:
+
+```bash
+./infer_hf.sh
+```
+
+Defaults can be changed in the script, via environment variables, or
+via command line options (CLI takes precedence). The default hardware
+flavor is `a10g-small` and default timeout is `12h`.
+
+If you want the job to fetch input files first, pass either
+`--input-file-urls` (comma-separated) or repeated `--input-file-url`.
+Those files are downloaded into `INPUT_DIR` before inference starts.
+
+Example with CLI overrides:
+
+```bash
+./infer_hf.sh \
+  --flavor a10g-large \
+  --timeout 12h \
+  --mode xml \
+  --input-dir ./infer_input \
+  --output-dir ./infer_output \
+  --input-file-url "https://example.org/A.xml" \
+  --input-file-url "https://example.org/B.xml"
 ```
 
 Examples:
