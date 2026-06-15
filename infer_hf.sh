@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Hugging Face Jobs inference launcher.
@@ -7,21 +7,98 @@ set -euo pipefail
 # ------------------------------------------------------------------
 # Configuration — adjust these values for your run
 # ------------------------------------------------------------------
-INPUT_DIR="./infer_input"
-OUTPUT_DIR="./infer_output"
-MODE="xml"                    # text | xml | jsonl
-EXTENSIONS=""                 # optional CSV without dots, e.g. "xml,tei"
-INPUT_FILE_URLS=""            # optional CSV of file URLs to download into INPUT_DIR
-BOUNDARY_MODEL_TYPE="flair"   # canine | flair
-BATCH_SIZE=32
-LANG_PREFIX=0                 # 1 enables --lang-prefix
-TEXT_OUTPUT="text"            # text | jsonl (only relevant in mode=text)
+INPUT_DIR="${INPUT_DIR:-./infer_input}"
+OUTPUT_DIR="${OUTPUT_DIR:-./infer_output}"
+MODE="${MODE:-xml}"                         # text | xml | jsonl
+EXTENSIONS="${EXTENSIONS:-}"                # optional CSV without dots, e.g. "xml,tei"
+INPUT_FILE_URLS="${INPUT_FILE_URLS:-}"      # optional CSV of file URLs to download into INPUT_DIR
+BOUNDARY_MODEL_TYPE="${BOUNDARY_MODEL_TYPE:-flair}"   # canine | flair
+BATCH_SIZE="${BATCH_SIZE:-32}"
+LANG_PREFIX="${LANG_PREFIX:-0}"             # 1 enables --lang-prefix
+TEXT_OUTPUT="${TEXT_OUTPUT:-text}"          # text | jsonl (only relevant in mode=text)
+FLAVOR="${FLAVOR:-a10g-small}"
+TIMEOUT="${TIMEOUT:-12h}"
 
 # Model repos and local download locations inside the job workspace.
-BOUNDARY_MODEL_REPO="mpilhlt/latin-contextual-lb-detector"
-BYT5_MODEL_REPO="mpilhlt/byt5-salamanca-abbr"
-BOUNDARY_MODEL_DIR="./models/latin-contextual-lb-detector"
-BYT5_MODEL_DIR="./models/byt5-salamanca-abbr"
+BOUNDARY_MODEL_REPO="${BOUNDARY_MODEL_REPO:-mschonhardt/latin-contextual-lb-detector}"
+BYT5_MODEL_REPO="${BYT5_MODEL_REPO:-mpilhlt/byt5-salamanca-abbr}"
+BOUNDARY_MODEL_DIR="${BOUNDARY_MODEL_DIR:-./models/latin-contextual-lb-detector}"
+BYT5_MODEL_DIR="${BYT5_MODEL_DIR:-./models/byt5-salamanca-abbr}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./infer_hf.sh [options]
+
+Options:
+  --input-dir <path>
+  --output-dir <path>
+  --mode <text|xml|jsonl>
+  --extensions <csv_no_dot>
+  --input-file-urls <csv_urls>
+  --input-file-url <url>            # can be repeated
+  --boundary-model-type <canine|flair>
+  --boundary-model-repo <owner/name>
+  --byt5-model-repo <owner/name>
+  --boundary-model-dir <path>
+  --byt5-model-dir <path>
+  --batch-size <int>
+  --text-output <text|jsonl>
+  --lang-prefix
+  --flavor <t4-small|t4-medium|a10g-small|a10g-large|a10g-largex2|a10g-largex4|a100-large>
+  --timeout <duration>              # e.g. 12h
+  -h, --help
+EOF
+}
+
+append_csv() {
+  value="$1"
+  if [ -z "$INPUT_FILE_URLS" ]; then
+    INPUT_FILE_URLS="$value"
+  else
+    INPUT_FILE_URLS="${INPUT_FILE_URLS},$value"
+  fi
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --input-dir) INPUT_DIR="${2:-}"; shift 2 ;;
+    --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
+    --mode) MODE="${2:-}"; shift 2 ;;
+    --extensions) EXTENSIONS="${2:-}"; shift 2 ;;
+    --input-file-urls) INPUT_FILE_URLS="${2:-}"; shift 2 ;;
+    --input-file-url) append_csv "${2:-}"; shift 2 ;;
+    --boundary-model-type) BOUNDARY_MODEL_TYPE="${2:-}"; shift 2 ;;
+    --boundary-model-repo) BOUNDARY_MODEL_REPO="${2:-}"; shift 2 ;;
+    --byt5-model-repo) BYT5_MODEL_REPO="${2:-}"; shift 2 ;;
+    --boundary-model-dir) BOUNDARY_MODEL_DIR="${2:-}"; shift 2 ;;
+    --byt5-model-dir) BYT5_MODEL_DIR="${2:-}"; shift 2 ;;
+    --batch-size) BATCH_SIZE="${2:-}"; shift 2 ;;
+    --text-output) TEXT_OUTPUT="${2:-}"; shift 2 ;;
+    --lang-prefix) LANG_PREFIX=1; shift 1 ;;
+    --flavor) FLAVOR="${2:-}"; shift 2 ;;
+    --timeout) TIMEOUT="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: Unknown argument: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+case "$FLAVOR" in
+  t4-small|t4-medium|a10g-small|a10g-large|a10g-largex2|a10g-largex4|a100-large) ;;
+  *) echo "ERROR: Unsupported --flavor '$FLAVOR'" >&2; exit 1 ;;
+esac
+case "$MODE" in
+  text|xml|jsonl) ;;
+  *) echo "ERROR: Unsupported --mode '$MODE'" >&2; exit 1 ;;
+esac
+case "$BOUNDARY_MODEL_TYPE" in
+  canine|flair) ;;
+  *) echo "ERROR: Unsupported --boundary-model-type '$BOUNDARY_MODEL_TYPE'" >&2; exit 1 ;;
+esac
+case "$TEXT_OUTPUT" in
+  text|jsonl) ;;
+  *) echo "ERROR: Unsupported --text-output '$TEXT_OUTPUT'" >&2; exit 1 ;;
+esac
 
 EXTRA_ARGS=""
 if [ -n "$EXTENSIONS" ]; then
@@ -35,8 +112,8 @@ if [ "$LANG_PREFIX" = "1" ]; then
 fi
 
 hf jobs uv run \
-  --flavor a100-large \
-  --timeout 2h \
+  --flavor "$FLAVOR" \
+  --timeout "$TIMEOUT" \
   --label Salamanca \
   --label task=inference \
   --secrets HF_TOKEN \

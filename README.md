@@ -228,12 +228,26 @@ Use the provided job launcher:
 ./infer_hf.sh
 ```
 
-Before running, adjust the configuration block at the top of
-`infer_hf.sh` (input/output directories, mode, model repos, etc.).
+Defaults can be changed in the script, via environment variables, or
+via command line options (CLI takes precedence). The default hardware
+flavor is `a10g-small` and default timeout is `12h`.
 
-If you want the job to fetch input files first, set `INPUT_FILE_URLS`
-to a comma-separated list of file URLs in `infer_hf.sh`. Those files
-are downloaded into `INPUT_DIR` before inference starts.
+If you want the job to fetch input files first, pass either
+`--input-file-urls` (comma-separated) or repeated `--input-file-url`.
+Those files are downloaded into `INPUT_DIR` before inference starts.
+
+Example with CLI overrides:
+
+```bash
+./infer_hf.sh \
+  --flavor a10g-large \
+  --timeout 12h \
+  --mode xml \
+  --input-dir ./infer_input \
+  --output-dir ./infer_output \
+  --input-file-url "https://example.org/A.xml" \
+  --input-file-url "https://example.org/B.xml"
+```
 
 Examples:
 
