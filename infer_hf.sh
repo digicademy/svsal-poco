@@ -111,29 +111,8 @@ if [ "$LANG_PREFIX" = "1" ]; then
   EXTRA_ARGS="$EXTRA_ARGS --lang-prefix"
 fi
 
-hf jobs uv run \
-  --flavor "$FLAVOR" \
-  --timeout "$TIMEOUT" \
-  --label Salamanca \
-  --label task=inference \
-  --secrets HF_TOKEN \
-  --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  --env INPUT_DIR="$INPUT_DIR" \
-  --env INPUT_FILE_URLS="$INPUT_FILE_URLS" \
-  --with 'transformers>=4.40.0' \
-  --with 'datasets>=2.18.0' \
-  --with 'evaluate>=0.4.0' \
-  --with 'scikit-learn>=1.3.0' \
-  --with 'accelerate>=1.1.0' \
-  --with 'torch==2.8.0' \
-  --with jiwer \
-  --with tensorboard \
-  --with codecarbon \
-  --with 'huggingface-hub>=0.22.0' \
-  --with 'git+https://github.com/digicademy/svsal-poco' \
-  bash -lc "\
-    mkdir -p \"$INPUT_DIR\" \"$OUTPUT_DIR\" ./models && \
-    python - <<'PY' && \
+# Encode the Python download helper so quoting inside bash -lc "..." is not an issue.
+PY_SCRIPT=$(base64 -w0 <<'PY'
 import os, re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -159,6 +138,32 @@ if raw_urls:
 else:
     print('No INPUT_FILE_URLS configured; skipping preparatory input download.')
 PY
+)
+
+hf jobs uv run \
+  --flavor "$FLAVOR" \
+  --timeout "$TIMEOUT" \
+  --label Salamanca \
+  --label task=inference \
+  --secrets HF_TOKEN \
+  --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  --env INPUT_DIR="$INPUT_DIR" \
+  --env INPUT_FILE_URLS="$INPUT_FILE_URLS" \
+  --env PY_SCRIPT="$PY_SCRIPT" \
+  --with 'transformers>=4.40.0' \
+  --with 'datasets>=2.18.0' \
+  --with 'evaluate>=0.4.0' \
+  --with 'scikit-learn>=1.3.0' \
+  --with 'accelerate>=1.1.0' \
+  --with 'torch==2.8.0' \
+  --with jiwer \
+  --with tensorboard \
+  --with codecarbon \
+  --with 'huggingface-hub>=0.22.0' \
+  --with 'git+https://github.com/digicademy/svsal-poco' \
+  bash -lc "
+    mkdir -p \"$INPUT_DIR\" \"$OUTPUT_DIR\" ./models && \
+    echo \"\$PY_SCRIPT\" | base64 -d | python - && \
     hf download --repo-type model \"$BOUNDARY_MODEL_REPO\" --local-dir \"$BOUNDARY_MODEL_DIR\" && \
     hf download --repo-type model \"$BYT5_MODEL_REPO\" --local-dir \"$BYT5_MODEL_DIR\" && \
     bash infer_local_batch.sh \
