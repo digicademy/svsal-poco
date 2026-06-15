@@ -18,6 +18,7 @@ import argparse
 import torch
 from pathlib import Path
 from collections import defaultdict
+from typing import Optional
 from transformers import AutoTokenizer, T5ForConditionalGeneration, CanineTokenizer
 
 from data.data_utils import load_and_sort_lines, CorpusLexicon, ABBR_OPEN, ABBR_CLOSE, LINE_BREAK, LINE_SEP
@@ -211,6 +212,58 @@ def expand_abbreviations(
     return outputs
 
 
+def _split_window_output_parts(
+    output: str,
+    expected_parts: int,
+    split_pattern: re.Pattern,
+) -> tuple[list[str], Optional[str]]:
+    """
+    Split a window output into line parts.
+
+    Returns (parts, warning_suffix). warning_suffix is None on exact split.
+    """
+    if expected_parts <= 1:
+        return [output], None
+
+    raw_parts = split_pattern.split(output)
+    if len(raw_parts) == expected_parts:
+        return raw_parts, None
+
+    limited_parts = split_pattern.split(output, maxsplit=expected_parts - 1)
+    if len(limited_parts) == expected_parts:
+        return limited_parts, (
+            f"recovered via maxsplit (raw split produced {len(raw_parts)} parts)"
+        )
+
+    return raw_parts, None
+
+
+def _recover_window_parts(
+    parts: list[str],
+    expected_parts: int,
+    source_lines: list[str],
+) -> tuple[list[str], list[str]]:
+    """
+    Recover window parts to expected_parts using conservative best effort.
+
+    Returns (recovered_parts, recovery_notes).
+    """
+    recovered = list(parts)
+    notes: list[str] = []
+
+    if len(recovered) > expected_parts:
+        overflow = len(recovered) - expected_parts + 1
+        recovered = recovered[:expected_parts - 1] + ["".join(recovered[expected_parts - 1:])]
+        notes.append(f"collapsed {overflow} overflow part(s) into final line")
+
+    if len(recovered) < expected_parts:
+        missing_count = expected_parts - len(recovered)
+        recovered.extend(source_lines[len(recovered):expected_parts])
+        notes.append(f"filled {missing_count} missing part(s) from original source lines")
+
+    return recovered, notes
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -397,25 +450,31 @@ def run_pipeline(
         indices = window["line_indices"]
         owned_start = window["owned_start"]
         owned_end = window["owned_end"]
-        parts = LINE_SPLIT_PATTERN.split(output)
+        expected_parts = len(indices)
+        parts, split_note = _split_window_output_parts(
+            output, expected_parts, LINE_SPLIT_PATTERN,
+        )
 
-        # The model should produce one part per input line.
-        # If the count doesn't match (model hallucinated or dropped a
-        # separator), fall back to using the original text for owned lines.
-        if len(parts) != len(indices):
-            print(f"  Warning: window expected {len(indices)} parts, "
-                  f"got {len(parts)}. Using original text for owned lines.")
-            for idx in indices[owned_start:owned_end]:
-                line_id = lines_with_boundaries[idx]["id"]
-                if line_id not in output_by_line_id:
-                    output_by_line_id[line_id] = lines_with_boundaries[idx]["source_sic"]
-            continue
+        source_lines = [lines_with_boundaries[idx]["source_sic"] for idx in indices]
+        recovered, warning_notes = _recover_window_parts(
+            parts, expected_parts, source_lines,
+        )
+        if split_note:
+            warning_notes.append(split_note)
+
+        if warning_notes:
+            print(
+                f"  Warning: window expected {expected_parts} parts, "
+                f"got {len(parts)}. Applying best-effort recovery: "
+                + "; ".join(warning_notes)
+                + "."
+            )
 
         # Keep only owned lines
         for offset in range(owned_start, owned_end):
             line_idx = indices[offset]
             line_id = lines_with_boundaries[line_idx]["id"]
-            output_by_line_id[line_id] = parts[offset]
+            output_by_line_id[line_id] = recovered[offset]
 
     # --- Stage 5: write output ---
     print(f"Writing output to {output_path}...")

@@ -1257,15 +1257,17 @@ def _apply_line_expansion(
     """
     original = line.plain_text
     changes = _find_changes(original, expanded)
+    changes_with_exp_text = _merge_changes_by_shared_runs(
+        changes, line.text_runs, original, expanded,
+    )
 
-    if not changes:
+    if not changes_with_exp_text:
         return
 
     # Process changes in reverse order (right to left) so that
     # earlier offsets remain valid as we modify the tree
-    for orig_start, orig_end, exp_start, exp_end in reversed(changes):
+    for orig_start, orig_end, exp_text in reversed(changes_with_exp_text):
         orig_text = original[orig_start:orig_end]
-        exp_text = expanded[exp_start:exp_end]
 
         if not orig_text or not exp_text:
             continue
@@ -1291,6 +1293,53 @@ def _apply_line_expansion(
         # Move affected notes to after the <choice>
         for note_info in affected_notes:
             _move_note_after(note_info, choice)
+
+
+def _merge_changes_by_shared_runs(
+    changes: list[tuple[int, int, int, int]],
+    text_runs: list[TextRun],
+    original: str,
+    expanded: str,
+) -> list[tuple[int, int, str]]:
+    """
+    Merge adjacent changes when their affected run sets overlap.
+
+    This avoids applying two independent tree surgeries to ranges that share
+    the same underlying XML node, which can orphan the insertion anchor for
+    the second change when processing right-to-left.
+    """
+    if not changes:
+        return []
+
+    merged: list[tuple[int, int, str]] = []
+    cur_o1, cur_o2, cur_e1, cur_e2 = changes[0]
+    cur_exp_text = expanded[cur_e1:cur_e2]
+    cur_run_nodes = {
+        id(run.node)
+        for run in text_runs
+        if run.plain_end > cur_o1 and run.plain_start < cur_o2
+    }
+
+    for o1, o2, e1, e2 in changes[1:]:
+        next_run_nodes = {
+            id(run.node)
+            for run in text_runs
+            if run.plain_end > o1 and run.plain_start < o2
+        }
+
+        if cur_run_nodes.intersection(next_run_nodes):
+            unchanged_between = original[cur_o2:o1] if o1 >= cur_o2 else ""
+            cur_exp_text = cur_exp_text + unchanged_between + expanded[e1:e2]
+            cur_o2 = max(cur_o2, o2)
+            cur_run_nodes.update(next_run_nodes)
+        else:
+            merged.append((cur_o1, cur_o2, cur_exp_text))
+            cur_o1, cur_o2, cur_e1, cur_e2 = o1, o2, e1, e2
+            cur_exp_text = expanded[cur_e1:cur_e2]
+            cur_run_nodes = next_run_nodes
+
+    merged.append((cur_o1, cur_o2, cur_exp_text))
+    return merged
 
 
 def _find_changes(
