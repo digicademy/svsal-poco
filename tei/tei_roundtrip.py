@@ -1498,6 +1498,10 @@ def _apply_change_preserving_markup(
     # --- Insert <choice> ---
     choice.tail = after_text if after_text else None
 
+    if insert_parent is None:
+        # Anchor node was detached by an earlier change in this pass; skip safely.
+        return None
+
     if insert_after is not None:
         idx = list(insert_parent).index(insert_after) + 1
     else:
