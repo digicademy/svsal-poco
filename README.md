@@ -231,6 +231,10 @@ Use the provided job launcher:
 Before running, adjust the configuration block at the top of
 `infer_hf.sh` (input/output directories, mode, model repos, etc.).
 
+If you want the job to fetch input files first, set `INPUT_FILE_URLS`
+to a comma-separated list of file URLs in `infer_hf.sh`. Those files
+are downloaded into `INPUT_DIR` before inference starts.
+
 Examples:
 
 ```bash

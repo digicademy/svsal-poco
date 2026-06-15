@@ -11,6 +11,7 @@ INPUT_DIR="./infer_input"
 OUTPUT_DIR="./infer_output"
 MODE="xml"                    # text | xml | jsonl
 EXTENSIONS=""                 # optional CSV without dots, e.g. "xml,tei"
+INPUT_FILE_URLS=""            # optional CSV of file URLs to download into INPUT_DIR
 BOUNDARY_MODEL_TYPE="flair"   # canine | flair
 BATCH_SIZE=32
 LANG_PREFIX=0                 # 1 enables --lang-prefix
@@ -40,6 +41,8 @@ hf jobs uv run \
   --label task=inference \
   --secrets HF_TOKEN \
   --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  --env INPUT_DIR="$INPUT_DIR" \
+  --env INPUT_FILE_URLS="$INPUT_FILE_URLS" \
   --with 'transformers>=4.40.0' \
   --with 'datasets>=2.18.0' \
   --with 'evaluate>=0.4.0' \
@@ -52,7 +55,26 @@ hf jobs uv run \
   --with 'huggingface-hub>=0.22.0' \
   --with 'git+https://github.com/digicademy/svsal-poco' \
   bash -lc "\
-    mkdir -p \"$OUTPUT_DIR\" ./models && \
+    mkdir -p \"$INPUT_DIR\" \"$OUTPUT_DIR\" ./models && \
+    python - <<'PY' && \
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import urlretrieve
+
+raw_urls = os.getenv('INPUT_FILE_URLS', '').strip()
+if raw_urls:
+    input_dir = Path(os.getenv('INPUT_DIR', './infer_input'))
+    input_dir.mkdir(parents=True, exist_ok=True)
+    urls = [u.strip() for u in raw_urls.split(',') if u.strip()]
+    for i, url in enumerate(urls, 1):
+        file_name = Path(urlparse(url).path).name or f'download_{i}'
+        target = input_dir / file_name
+        print(f'Downloading [{i}/{len(urls)}]: {url} -> {target}')
+        urlretrieve(url, target)
+else:
+    print('No INPUT_FILE_URLS configured; skipping preparatory input download.')
+PY
     hf download --repo-type model \"$BOUNDARY_MODEL_REPO\" --local-dir \"$BOUNDARY_MODEL_DIR\" && \
     hf download --repo-type model \"$BYT5_MODEL_REPO\" --local-dir \"$BYT5_MODEL_DIR\" && \
     bash infer_local_batch.sh \
