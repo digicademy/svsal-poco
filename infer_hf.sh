@@ -25,6 +25,11 @@ BYT5_MODEL_REPO="${BYT5_MODEL_REPO:-mpilhlt/byt5-salamanca-abbr}"
 BOUNDARY_MODEL_DIR="${BOUNDARY_MODEL_DIR:-./models/latin-contextual-lb-detector}"
 BYT5_MODEL_DIR="${BYT5_MODEL_DIR:-./models/byt5-salamanca-abbr}"
 
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -111,35 +116,101 @@ if [ "$LANG_PREFIX" = "1" ]; then
   EXTRA_ARGS="$EXTRA_ARGS --lang-prefix"
 fi
 
-# Encode the Python download helper so quoting inside bash -lc "..." is not an issue.
-PY_SCRIPT=$(base64 -w0 <<'PY'
-import os, re
-from pathlib import Path
-from urllib.parse import urlparse
-from urllib.request import urlopen
+# Function to extract filename from Content-Disposition header (simplified and robust)
+extract_filename_from_header() {
+  local url="$1"
+  
+  # Get the Content-Disposition header
+  local content_disposition=$(curl -sI "$url" | grep -i "content-disposition" | head -1)
+  
+  if [ -n "$content_disposition" ]; then
+    # Try to extract filename from the header using a more robust method
+    # First, try to match the UTF-8 encoded version
+    local filename=$(echo "$content_disposition" | grep -o 'filename\*\=[^;]*' | cut -d'=' -f2- | sed "s/^UTF-8''//")
+    if [ -n "$filename" ]; then
+      echo "$filename"
+      return
+    fi
+    
+    # Then try quoted version
+    local filename=$(echo "$content_disposition" | grep -o 'filename="[^"]*"' | cut -d'"' -f2)
+    if [ -n "$filename" ]; then
+      echo "$filename"
+      return
+    fi
+    
+    # Then try unquoted version
+    local filename=$(echo "$content_disposition" | grep -o 'filename=[^;]*' | cut -d'=' -f2)
+    if [ -n "$filename" ]; then
+      echo "$filename"
+      return
+    fi
+  fi
+  
+  # If no filename found in headers, fall back to basename
+  basename "$url"
+}
 
-raw_urls = os.getenv('INPUT_FILE_URLS', '').strip()
-if raw_urls:
-    input_dir = Path(os.getenv('INPUT_DIR', './infer_input'))
-    input_dir.mkdir(parents=True, exist_ok=True)
-    urls = [u.strip() for u in raw_urls.split(',') if u.strip()]
-    for i, url in enumerate(urls, 1):
-        with urlopen(url) as resp:
-            cd = resp.headers.get('Content-Disposition', '')
-            m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)', cd, re.IGNORECASE)
-            if m:
-                file_name = Path(m.group(1).strip()).name
-            else:
-                file_name = Path(urlparse(url).path).name or f'download_{i}'
-            data = resp.read()
-        target = input_dir / file_name
-        print(f'Downloading [{i}/{len(urls)}]: {url} -> {target}')
-        target.write_bytes(data)
-else:
-    print('No INPUT_FILE_URLS configured; skipping preparatory input download.')
-PY
-)
+# Build the download command for the container
+DOWNLOAD_CMD=""
+if [ -n "$INPUT_FILE_URLS" ]; then
+  log "Build download command for INPUT_FILE_URLS: $INPUT_FILE_URLS"
+  IFS=',' read -ra URLS <<< "$INPUT_FILE_URLS"
+  for i in "${!URLS[@]}"; do
+    url="${URLS[i]}"
+    
+    # Extract filename properly
+    filename=$(extract_filename_from_header "$url")
+    
+    # Clean up filename
+    filename=$(echo "$filename" | sed 's/"//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    # If filename is still problematic, use basename as fallback
+    if [[ "$filename" == *"download"* ]] || [ -z "$filename" ]; then
+      filename=$(basename "$url")
+      # If basename is still just "download", give it a sensible default
+      if [[ "$filename" == "download" ]]; then
+        filename="document.xml"  # Change this default as needed
+      fi
+    fi
+    
+    log "I will be downloading the file $((i+1))/${#URLS[@]}: $url -> $INPUT_DIR/$filename"
+    DOWNLOAD_CMD+="curl -L --retry 3 --retry-delay 5 -o \"$INPUT_DIR/$filename\" \"$url\" && echo \"Downloaded: $url as $filename\" || (echo \"Failed to download: $url\"; exit 1); "
+  done
+else
+  log "No INPUT_FILE_URLS configured; skipping preparatory input download."
+fi
 
+# Create a summary log file
+SUMMARY_LOG="/tmp/job_summary_$(date +%s).log"
+
+log "Starting Hugging Face Job with configuration:"
+log "  Input Directory: $INPUT_DIR"
+log "  Output Directory: $OUTPUT_DIR"
+log "  Mode: $MODE"
+log "  Batch Size: $BATCH_SIZE"
+log "  Flavor: $FLAVOR"
+log "  Boundary Model Repo: $BOUNDARY_MODEL_REPO"
+log "  BYT5 Model Repo: $BYT5_MODEL_REPO"
+
+# Write summary to file for later retrieval
+{
+  echo "Job Summary - $(date)"
+  echo "=================="
+  echo "Input Directory: $INPUT_DIR"
+  echo "Output Directory: $OUTPUT_DIR"
+  echo "Mode: $MODE"
+  echo "Batch Size: $BATCH_SIZE"
+  echo "Flavor: $FLAVOR"
+  echo "Boundary Model Repo: $BOUNDARY_MODEL_REPO"
+  echo "BYT5 Model Repo: $BYT5_MODEL_REPO"
+  echo "Input Files: $INPUT_FILE_URLS"
+  echo "Extra Args: $EXTRA_ARGS"
+  echo ""
+} > "$SUMMARY_LOG"
+
+# Main execution - everything happens in the container
+log "Executing Hugging Face Job..."
 hf jobs uv run \
   --flavor "$FLAVOR" \
   --timeout "$TIMEOUT" \
@@ -149,7 +220,6 @@ hf jobs uv run \
   --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --env INPUT_DIR="$INPUT_DIR" \
   --env INPUT_FILE_URLS="$INPUT_FILE_URLS" \
-  --env PY_SCRIPT="$PY_SCRIPT" \
   --with 'transformers>=4.40.0' \
   --with 'datasets>=2.18.0' \
   --with 'evaluate>=0.4.0' \
@@ -161,18 +231,50 @@ hf jobs uv run \
   --with codecarbon \
   --with 'huggingface-hub>=0.22.0' \
   --with 'git+https://github.com/digicademy/svsal-poco' \
-  bash -lc "
-    mkdir -p \"$INPUT_DIR\" \"$OUTPUT_DIR\" ./models && \
-    echo \"\$PY_SCRIPT\" | base64 -d | python - && \
-    hf download --repo-type model \"$BOUNDARY_MODEL_REPO\" --local-dir \"$BOUNDARY_MODEL_DIR\" && \
-    hf download --repo-type model \"$BYT5_MODEL_REPO\" --local-dir \"$BYT5_MODEL_DIR\" && \
-    bash infer_local_batch.sh \
-      --mode \"$MODE\" \
-      --input-dir \"$INPUT_DIR\" \
-      --output-dir \"$OUTPUT_DIR\" \
-      --batch-size \"$BATCH_SIZE\" \
-      --text-output \"$TEXT_OUTPUT\" \
-      --boundary-model-dir \"$BOUNDARY_MODEL_DIR\" \
-      --byt5-model-dir \"$BYT5_MODEL_DIR\" \
-      $EXTRA_ARGS
+  bash -c "
+    set -euxo pipefail \\
+    
+    # Define logging function inline
+    log() { echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] \$*\" >&2; } \\
+    
+    # Create directories
+    mkdir -p \"$INPUT_DIR\" \"$OUTPUT_DIR\" ./models && \\
+    log 'Directories created' \\
+    
+    # Log start of download phase
+    log 'Starting download phase...' \\
+    
+    # Download files if specified
+    $DOWNLOAD_CMD \\
+    
+    # Get inferencing scripts
+    git clone https://github.com/digicademy/svsal-poco.git && \\
+    cp svsal-poco/infer_*.* . \\
+
+    # Log model download start
+    log 'Downloading boundary model...' && \\
+    hf download --repo-type model \"$BOUNDARY_MODEL_REPO\" --local-dir \"$BOUNDARY_MODEL_DIR\" \\
+    
+    log 'Downloading BYT5 model...' && \\
+    hf download --repo-type model \"$BYT5_MODEL_REPO\" --local-dir \"$BYT5_MODEL_DIR\" \\
+    
+    # Log completion of setup
+    log 'Setup complete. Starting inference...' \\
+    
+    # Run inference
+    bash infer_local_batch.sh \\
+      --mode \"$MODE\" \\
+      --input-dir \"$INPUT_DIR\" \\
+      --output-dir \"$OUTPUT_DIR\" \\
+      --batch-size \"$BATCH_SIZE\" \\
+      --text-output \"$TEXT_OUTPUT\" \\
+      --boundary-model-dir \"$BOUNDARY_MODEL_DIR\" \\
+      --byt5-model-dir \"$BYT5_MODEL_DIR\" \\
+      $EXTRA_ARGS \\
+    
+    # Log completion
+    log 'Inference completed successfully!' \\
+    
+    # Copy summary log to output directory for easy retrieval
+    cp \"$SUMMARY_LOG\" \"$OUTPUT_DIR/job_summary.log\" 2>/dev/null || true
 "
