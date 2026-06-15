@@ -38,6 +38,7 @@ svsal-poco/
 │                              # that have been killed (due to timeout) after training
 │                              # has completed
 ├── infer_handler.py           # Python CLI for `text`, `jsonl`, and `xml` modes
+├── infer_hf.sh                # Batch inference job on Hugging Face Jobs
 ├── infer_local.sh             # File-to-file wrapper for single inputs
 ├── infer_local_batch.sh       # Recursive directory batch processing
 ├── prepare_viper.sh           # Script to download all online resources for HPC nodes
@@ -218,6 +219,17 @@ Notes:
   --boundary-model-dir ./canine-salamanca-boundary-classifier \
   --byt5-model-dir ./byt5-salamanca-abbr
 ```
+
+### Inference on Hugging Face Jobs
+
+Use the provided job launcher:
+
+```bash
+./infer_hf.sh
+```
+
+Before running, adjust the configuration block at the top of
+`infer_hf.sh` (input/output directories, mode, model repos, etc.).
 
 Examples:
 
