@@ -134,10 +134,10 @@ hf jobs uv run \
   bash -lc "\
     mkdir -p \"$INPUT_DIR\" \"$OUTPUT_DIR\" ./models && \
     python - <<'PY' && \
-import os
+import os, re
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import urlretrieve
+from urllib.request import urlopen
 
 raw_urls = os.getenv('INPUT_FILE_URLS', '').strip()
 if raw_urls:
@@ -145,10 +145,17 @@ if raw_urls:
     input_dir.mkdir(parents=True, exist_ok=True)
     urls = [u.strip() for u in raw_urls.split(',') if u.strip()]
     for i, url in enumerate(urls, 1):
-        file_name = Path(urlparse(url).path).name or f'download_{i}'
+        with urlopen(url) as resp:
+            cd = resp.headers.get('Content-Disposition', '')
+            m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)', cd, re.IGNORECASE)
+            if m:
+                file_name = Path(m.group(1).strip()).name
+            else:
+                file_name = Path(urlparse(url).path).name or f'download_{i}'
+            data = resp.read()
         target = input_dir / file_name
         print(f'Downloading [{i}/{len(urls)}]: {url} -> {target}')
-        urlretrieve(url, target)
+        target.write_bytes(data)
 else:
     print('No INPUT_FILE_URLS configured; skipping preparatory input download.')
 PY
@@ -162,4 +169,5 @@ PY
       --text-output \"$TEXT_OUTPUT\" \
       --boundary-model-dir \"$BOUNDARY_MODEL_DIR\" \
       --byt5-model-dir \"$BYT5_MODEL_DIR\" \
-      $EXTRA_ARGS"
+      $EXTRA_ARGS
+"
