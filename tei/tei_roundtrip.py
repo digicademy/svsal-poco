@@ -1233,6 +1233,8 @@ def _insert_choice_at_line_end(
         if run.plain_start < at_offset:
             if run.is_tail:
                 parent = run.node.getparent()
+                if parent is None:
+                    continue
                 idx = list(parent).index(run.node)
                 parent.insert(idx + 1, choice)
             else:

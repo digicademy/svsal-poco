@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from typing import Optional
 
+from lxml import etree
+
 
 def _load_functions(path: Path, names: list[str], globals_dict: dict):
     source = path.read_text(encoding="utf-8")
@@ -78,6 +80,50 @@ class SharedRunMergeTests(unittest.TestCase):
         changes = [(1, 2, 1, 3), (4, 5, 5, 6)]
         merged = self.merge_changes(changes, runs, "abcdef", "aXYcdZf")
         self.assertEqual(merged, [(1, 2, "XY"), (4, 5, "Z")])
+
+
+class CrossLineChoiceInsertionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        funcs = _load_functions(
+            root / "tei" / "tei_roundtrip.py",
+            ["_truncate_line_end", "_insert_choice_at_line_end"],
+            {
+                "ExtractedLine": object,
+                "etree": etree,
+                "_is_inline_element": lambda node: node.tag == "hi",
+            },
+        )
+        cls.truncate_line_end = staticmethod(funcs["_truncate_line_end"])
+        cls.insert_choice_at_line_end = staticmethod(funcs["_insert_choice_at_line_end"])
+
+    def test_insert_choice_skips_detached_tail_anchor_after_truncate(self):
+        parent = etree.Element("p")
+        lb = etree.SubElement(parent, "lb")
+        lb.tail = "ab"
+        inline = etree.SubElement(parent, "hi")
+        inline.text = ""
+        inline.tail = "x"
+
+        line = types.SimpleNamespace(
+            text_runs=[
+                types.SimpleNamespace(node=lb, is_tail=True, plain_start=0, plain_end=2, text="ab"),
+                types.SimpleNamespace(node=inline, is_tail=False, plain_start=5, plain_end=5, text=""),
+                types.SimpleNamespace(node=inline, is_tail=True, plain_start=4, plain_end=5, text="x"),
+            ],
+            lb_element=lb,
+        )
+
+        self.truncate_line_end(line, at_offset=5)
+
+        self.assertIsNone(inline.getparent())
+
+        choice = etree.Element("choice")
+        self.insert_choice_at_line_end(line, at_offset=5, choice=choice)
+
+        self.assertIs(choice.getparent(), parent)
+        self.assertEqual(list(parent), [lb, choice])
 
 
 if __name__ == "__main__":
