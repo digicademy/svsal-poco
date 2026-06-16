@@ -9,6 +9,7 @@ set -euo pipefail
 # ------------------------------------------------------------------
 INPUT_DIR="${INPUT_DIR:-./infer_input}"
 OUTPUT_DIR="${OUTPUT_DIR:-./infer_output}"
+OUTPUT_BUCKET="${OUTPUT_BUCKET:-mpilhlt/svsal-poco-output}"
 MODE="${MODE:-xml}"                         # text | xml | jsonl
 EXTENSIONS="${EXTENSIONS:-}"                # optional CSV without dots, e.g. "xml,tei"
 INPUT_FILE_URLS="${INPUT_FILE_URLS:-}"      # optional CSV of file URLs to download into INPUT_DIR
@@ -38,6 +39,7 @@ Usage:
 Options:
   --input-dir <path>
   --output-dir <path>
+  --output-bucket <owner/name>
   --mode <text|xml|jsonl>
   --extensions <csv_no_dot>
   --input-file-urls <csv_urls>
@@ -69,6 +71,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --input-dir) INPUT_DIR="${2:-}"; shift 2 ;;
     --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
+    --output-bucket) OUTPUT_BUCKET="${2:-}"; shift 2 ;;
     --mode) MODE="${2:-}"; shift 2 ;;
     --extensions) EXTENSIONS="${2:-}"; shift 2 ;;
     --input-file-urls) INPUT_FILE_URLS="${2:-}"; shift 2 ;;
@@ -181,12 +184,20 @@ else
   log "No INPUT_FILE_URLS configured; skipping preparatory input download."
 fi
 
+# Build bucket mount and upload commands if a bucket was specified
+if [ -n "$OUTPUT_BUCKET" ]; then
+  BUCKET_MOUNT_CMD="hf mount start bucket $OUTPUT_BUCKET /tmp/data"
+  BUCKET_MOUNT_PARA=("-v" "hf://buckets/$OUTPUT_BUCKET:/tmp/data")
+  BUCKET_UPLOAD_CMD="install -m 644 $OUTPUT_DIR/* /tmp/data/"
+fi
+
 # Create a summary log file
 SUMMARY_LOG="/tmp/job_summary_$(date +%s).log"
 
 log "Starting Hugging Face Job with configuration:"
 log "  Input Directory: $INPUT_DIR"
 log "  Output Directory: $OUTPUT_DIR"
+log "  Output Bucket: $OUTPUT_BUCKET"
 log "  Mode: $MODE"
 log "  Batch Size: $BATCH_SIZE"
 log "  Flavor: $FLAVOR"
@@ -199,6 +210,7 @@ log "  BYT5 Model Repo: $BYT5_MODEL_REPO"
   echo "=================="
   echo "Input Directory: $INPUT_DIR"
   echo "Output Directory: $OUTPUT_DIR"
+  echo "Output Bucket: $OUTPUT_BUCKET"
   echo "Mode: $MODE"
   echo "Batch Size: $BATCH_SIZE"
   echo "Flavor: $FLAVOR"
@@ -208,6 +220,9 @@ log "  BYT5 Model Repo: $BYT5_MODEL_REPO"
   echo "Extra Args: $EXTRA_ARGS"
   echo ""
 } > "$SUMMARY_LOG"
+
+echo "BUCKET_MOUNT_PARA: ${BUCKET_MOUNT_PARA[@]}"
+echo "BUCKET_UPLOAD_CMD: ${BUCKET_UPLOAD_CMD}"
 
 # Main execution - everything happens in the container
 log "Executing Hugging Face Job..."
@@ -220,6 +235,7 @@ hf jobs uv run \
   --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --env INPUT_DIR="$INPUT_DIR" \
   --env INPUT_FILE_URLS="$INPUT_FILE_URLS" \
+  "${BUCKET_MOUNT_PARA[@]}" \
   --with 'transformers>=4.40.0' \
   --with 'datasets>=2.18.0' \
   --with 'evaluate>=0.4.0' \
@@ -240,7 +256,14 @@ hf jobs uv run \
     # Create directories
     mkdir -p \"$INPUT_DIR\" \"$OUTPUT_DIR\" ./models && \\
     log 'Directories created' \\
-    
+
+    # Test bucket
+    echo "test" > "${OUTPUT_DIR}/test" && \\
+    $BUCKET_UPLOAD_CMD && \\
+    cat /tmp/data/test && \\
+    rm /tmp/data/test && \\
+    rm "${OUTPUT_DIR}/test" && \\
+
     # Log start of download phase
     log 'Starting download phase...' \\
     
@@ -276,5 +299,11 @@ hf jobs uv run \
     log 'Inference completed successfully!' \\
     
     # Copy summary log to output directory for easy retrieval
-    cp \"$SUMMARY_LOG\" \"$OUTPUT_DIR/job_summary.log\" 2>/dev/null || true
+    cp \"$SUMMARY_LOG\" \"$OUTPUT_DIR/job_summary.log\" 2>/dev/null || true \\
+
+    # Upload to bucket if specified
+    ls -la "${OUTPUT_DIR}" && \\
+    $BUCKET_UPLOAD_CMD && \\
+    ls -la /tmp/data
+    echo "ALL DONE"
 "
