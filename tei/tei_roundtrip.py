@@ -22,6 +22,7 @@ from __future__ import annotations
 import copy
 import re
 import unicodedata
+from datetime import date
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Optional
@@ -647,7 +648,7 @@ def apply_expansions(
     lines:                list[ExtractedLine],
     expanded_texts:       dict[str, str],     # line_id → expanded plain text
     boundary_predictions: dict[str, str],     # line_id → next_line_id (nonbreaking)
-    pre_annotated:        dict[str, str] = None,  # boundaries already in source XML
+    pre_annotated:        dict[str, str] | None = None,  # boundaries already in source XML
 ) -> etree._ElementTree:
     """
     Apply abbreviation expansions and boundary predictions back to the XML tree.
@@ -1073,6 +1074,17 @@ def _apply_cross_line_choice(
 
     choice.tail = choice_tail if choice_tail else (trailing_punct if trailing_punct else None)
 
+    # Evict any notes that fell inside the cross-line abbreviation token to after
+    # </choice>. A note is not part of the token's reading text, so it must not
+    # be pulled into <abbr> (nor reproduced in <expan>); it is re-anchored just
+    # after the whole <choice>. This mirrors the single-line path in
+    # _apply_line_expansion / _apply_chain_expansion, which the cross-line branch
+    # previously lacked.
+    affected_notes = [n for n in line1.notes if n.plain_offset >= word_start_in_l1]
+    affected_notes += [n for n in line2.notes if n.plain_offset < word_end_in_l2]
+    for note_info in affected_notes:
+        _move_note_after(note_info, choice)
+
 
 def _populate_abbr_from_runs(
     abbr_el:    etree._Element,
@@ -1091,7 +1103,7 @@ def _populate_abbr_from_runs(
         if not portion:
             continue
 
-        if not run.is_tail and _is_inline_element(run.node):
+        if not run.is_tail and _is_intoken_element(run.node):
             cloned = copy.deepcopy(run.node)
             cloned.text = portion
             cloned.tail = None
@@ -1124,7 +1136,7 @@ def _populate_abbr_from_runs_as_tail(
         if not portion:
             continue
 
-        if not run.is_tail and _is_inline_element(run.node):
+        if not run.is_tail and _is_intoken_element(run.node):
             cloned = copy.deepcopy(run.node)
             cloned.text = portion
             cloned.tail = None
@@ -1143,7 +1155,7 @@ def _truncate_line_end(line: ExtractedLine, at_offset: int) -> None:
             # Entire run is after the cut — clear it
             if run.is_tail:
                 run.node.tail = None
-            elif _is_inline_element(run.node):
+            elif _is_intoken_element(run.node):
                 parent = run.node.getparent()
                 if parent is not None:
                     # Transfer tail before removal
@@ -1182,7 +1194,7 @@ def _remove_line_start(
             # Entire run before cut — clear it
             if run.is_tail:
                 run.node.tail = None
-            elif _is_inline_element(run.node):
+            elif _is_intoken_element(run.node):
                 run.node.text = None
                 elements_to_maybe_remove.append(run.node)
             else:
@@ -1415,14 +1427,29 @@ def _merge_changes(
     return merged
 
 
-def _is_inline_element(node: etree._Element) -> bool:
-    """Check if a node is an inline element (g, hi, foreign, etc.) vs structural."""
+def _is_intoken_element(node: etree._Element) -> bool:
+    """True only for elements that are *part of* an abbreviation token and so
+    belong INSIDE <abbr> (cloned in, original removed): glyph elements <g>.
+
+    Span containers that merely *wrap* the token as text (<hi>, <foreign>,
+    <ref>, <term>, <mentioned>, <title>, <emph>, ...) are deliberately NOT
+    included: for those, <choice> nests inside the container and the container
+    is left in place, e.g.
+
+        <hi><choice><abbr>dño</abbr><expan>domino</expan></choice></hi>
+
+    rather than cloning <hi> into <abbr>. A <g> stays a single character/glyph
+    even when it carries text content (an ASCII/Unicode fallback plus an @ref),
+    so it is atomic and moves into <abbr> with its attributes intact.
+
+    Milestones (<lb>, <cb>, <pb>, <milestone>) are also conceptually in-token,
+    but they are handled separately on the cross-line path and do not surface as
+    text runs here, so they are not listed."""
     tag = node.tag
     if not isinstance(tag, str):
         return False
     local = tag.split("}")[-1] if "}" in tag else tag
-    return local in ("g", "hi", "foreign", "ref", "term", "mentioned",
-                     "title", "emph", "sic", "corr", "supplied", "del", "add")
+    return local == "g"
 
 
 def _apply_change_preserving_markup(
@@ -1471,7 +1498,7 @@ def _apply_change_preserving_markup(
         if not text_portion:
             continue
 
-        if not run.is_tail and _is_inline_element(run.node):
+        if not run.is_tail and _is_intoken_element(run.node):
             # Clone the inline element into <abbr>
             cloned = copy.deepcopy(run.node)
             cloned.text = text_portion
@@ -1492,7 +1519,7 @@ def _apply_change_preserving_markup(
         insert_parent = first_run.node.getparent()
         insert_after = first_run.node
     else:
-        if _is_inline_element(first_run.node):
+        if _is_intoken_element(first_run.node):
             insert_parent = first_run.node.getparent()
             insert_after = first_run.node.getprevious()
         else:
@@ -1504,8 +1531,15 @@ def _apply_change_preserving_markup(
 
     if last_run.is_tail:
         after_text = last_run.text[local_end_in_last:]
-    else:
+    elif _is_intoken_element(last_run.node):
+        # the in-token element (e.g. <g>) is moved into <abbr> and removed;
+        # what survives after </choice> is that element's tail
         after_text = last_run.node.tail or ""
+    else:
+        # the token lived in a wrapper/block .text (e.g. <hi>) which we keep in
+        # place: the surviving text is the remainder of that same text node,
+        # which becomes the choice's tail inside the preserved wrapper
+        after_text = last_run.text[local_end_in_last:]
 
     # --- Tree surgery ---
 
@@ -1515,14 +1549,14 @@ def _apply_change_preserving_markup(
 
     if first_run.is_tail:
         first_run.node.tail = before_text if before_text else None
-    elif not _is_inline_element(first_run.node):
+    elif not _is_intoken_element(first_run.node):
         first_run.node.text = before_text if before_text else None
 
     # Remove inline elements that were cloned into <abbr>
     nodes_to_remove: list[etree._Element] = []
     consumed_tails: set[int] = set()
     for run in affected_runs:
-        if not run.is_tail and _is_inline_element(run.node):
+        if not run.is_tail and _is_intoken_element(run.node):
             nodes_to_remove.append(run.node)
         if run.is_tail:
             consumed_tails.add(id(run.node))
@@ -1541,7 +1575,7 @@ def _apply_change_preserving_markup(
             parent.remove(node)
 
     # Clear last run's consumed text
-    if last_run is not first_run and not last_run.is_tail and not _is_inline_element(last_run.node):
+    if last_run is not first_run and not last_run.is_tail and not _is_intoken_element(last_run.node):
         last_run.node.text = None
     if last_run is not first_run and last_run.is_tail:
         last_run.node.tail = None
@@ -1603,6 +1637,151 @@ def _move_note_after(
         choice.tail = None
 
         choice_parent.insert(choice_idx + 1, note_el)
+
+
+# ---------------------------------------------------------------------------
+# Application information (teiHeader/encodingDesc/appInfo)
+# ---------------------------------------------------------------------------
+
+# Default Hugging Face org used to build a URL for any model identifier not
+# found in _MODEL_INFO below.
+_DEFAULT_HF_ORG = "mpilhlt"
+
+# Hugging Face URLs and human-readable labels for the models that may appear in
+# @resp, keyed by the model identifier exactly as written in @resp (i.e. the
+# value of EXPANSION_MODEL / BOUNDARY_MODEL). <application>/@version must be a
+# teidata.versionNumber (dotted integers), so the precise revision is NOT put
+# there; instead each <application> is stamped with @notAfter (the processing
+# date) and the repo URL is given without a commit hash.
+#
+# NB: the boundary step may be run with either of two interchangeable models —
+# a Flair model and a CANINE model. Whichever one BOUNDARY_MODEL names is the
+# one declared. If your identifier strings differ from the keys below, add/adjust
+# the entries (an unknown id falls back to https://huggingface.co/<org>/<id>).
+_MODEL_INFO = {
+    "byt5-salamanca-abbr": {
+        "url":   "https://huggingface.co/mpilhlt/byt5-salamanca-abbr",
+        "label": "ByT5 Salamanca abbreviation-expansion model",
+        "desc":  "Sequence-to-sequence model that expands abbreviations; "
+                 "supplies the content of tei:expan and the wrapping tei:choice.",
+    },
+    "flair-lb-detector": {
+        "url":   "https://huggingface.co/mschonhardt/latin-contextual-lb-detector",
+        "label": "Flair contextual line-boundary detector",
+        "desc":  "Token-level classifier predicting whether a line break falls "
+                 "inside a word; supplies tei:lb/@break=\"no\".",
+    },
+    "canine-salamanca-boundary-classifier": {
+        "url":   "https://huggingface.co/mpilhlt/canine-salamanca-boundary-classifier",
+        "label": "CANINE Salamanca boundary classifier",
+        "desc":  "Token-level classifier predicting whether a line break falls "
+                 "inside a word; supplies tei:lb/@break=\"no\".",
+    },
+}
+
+
+def _model_info(model_id: str) -> dict:
+    """Return {url, label, desc} for a model id, with a sensible fallback."""
+    info = _MODEL_INFO.get(model_id)
+    if info is not None:
+        return info
+    return {
+        "url":   f"https://huggingface.co/{_DEFAULT_HF_ORG}/{model_id}",
+        "label": model_id,
+        "desc":  f"Model {model_id}.",
+    }
+
+
+def _set_xml_id(el: etree._Element, value: str) -> None:
+    """Set xml:id in the XML namespace."""
+    el.set(f"{{{XML_NS}}}id", value)
+
+
+def _ensure_app_info(
+    root:            etree._Element,
+    processing_date: Optional[str] = None,
+) -> None:
+    """
+    Declare, in teiHeader/encodingDesc/appInfo, the applications that the @resp
+    pointers refer to: the svsal-poco pipeline (given xml:id="auto" so the
+    literal "#auto" token keeps resolving) plus the active expansion and
+    boundary models (xml:id == the model identifier, matching the "#<model>"
+    token in @resp).
+
+    Each <application> carries the required @ident and @version, plus @notAfter
+    set to the processing date (the model revision is therefore recorded by date
+    rather than by commit hash) and a <ref> to its repository URL.
+
+    Idempotent (no duplicate <application> elements on re-runs) and a no-op when
+    there is no <teiHeader> (e.g. a bare fragment).
+    """
+    if processing_date is None:
+        processing_date = date.today().isoformat()
+
+    # Locate the teiHeader. root may be the TEI element, the teiHeader itself,
+    # or a header-less fragment.
+    if root.tag == _tag("teiHeader"):
+        header = root
+    else:
+        header = next(iter(root.iter(_tag("teiHeader"))), None)
+    if header is None:
+        return  # fragment without a header — nothing to attach to
+
+    # Find or create <encodingDesc>, keeping teiHeader child order valid
+    # (after <fileDesc>, before <revisionDesc>).
+    enc = header.find(_tag("encodingDesc"))
+    if enc is None:
+        enc = etree.Element(_tag("encodingDesc"))
+        file_desc = header.find(_tag("fileDesc"))
+        rev_desc = header.find(_tag("revisionDesc"))
+        if file_desc is not None:
+            file_desc.addnext(enc)
+        elif rev_desc is not None:
+            rev_desc.addprevious(enc)
+        else:
+            header.append(enc)
+
+    # Find or create <appInfo>.
+    app_info = enc.find(_tag("appInfo"))
+    if app_info is None:
+        app_info = etree.SubElement(enc, _tag("appInfo"))
+
+    existing_ids = {_xml_id(a) for a in app_info.findall(_tag("application"))}
+
+    exp_info = _model_info(EXPANSION_MODEL)
+    bnd_info = _model_info(BOUNDARY_MODEL)
+
+    # (xml:id, ident, label, desc, url, [ptr targets])
+    apps = [
+        ("auto", "svsal-poco",
+         "svsal-poco transcription post-correction pipeline",
+         "Automated post-correction of transcriptions: abbreviation expansion "
+         "(tei:choice with tei:abbr/tei:expan) and line-boundary detection "
+         "(tei:lb/@break), applied via the svsal-poco toolchain.",
+         "https://github.com/digicademy/svsal-poco",
+         [EXPANSION_MODEL, BOUNDARY_MODEL]),
+        (EXPANSION_MODEL, EXPANSION_MODEL,
+         exp_info["label"], exp_info["desc"], exp_info["url"], []),
+        (BOUNDARY_MODEL, BOUNDARY_MODEL,
+         bnd_info["label"], bnd_info["desc"], bnd_info["url"], []),
+    ]
+
+    for xml_id, ident, label, desc, url, ptr_targets in apps:
+        if xml_id in existing_ids:
+            continue
+        app = etree.SubElement(app_info, _tag("application"))
+        _set_xml_id(app, xml_id)
+        app.set("ident", ident)
+        app.set("version", "1.0")
+        app.set("notAfter", processing_date)
+        # content model: model.labelLike+ , (model.ptrLike* | model.pLike*)
+        etree.SubElement(app, _tag("label")).text = label
+        desc_el = etree.SubElement(app, _tag("desc"))
+        desc_el.set(f"{{{XML_NS}}}lang", "en")
+        desc_el.text = desc
+        etree.SubElement(app, _tag("ref")).set("target", url)
+        for target_id in ptr_targets:
+            etree.SubElement(app, _tag("ptr")).set("target", f"#{target_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -1669,6 +1848,10 @@ def process_tei_xml(
 
     # Apply results
     apply_expansions(tree, lines, expanded_dict, boundary_dict, pre_annotated)
+
+    # Declare the applications referenced by the @resp pointers (the "#auto"
+    # pipeline marker and the model ids) in teiHeader/encodingDesc/appInfo.
+    _ensure_app_info(tree.getroot())
 
     # Serialize
     raw = etree.tostring(
