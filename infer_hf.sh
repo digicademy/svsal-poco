@@ -17,7 +17,7 @@ BOUNDARY_MODEL_TYPE="${BOUNDARY_MODEL_TYPE:-flair}"   # canine | flair
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LANG_PREFIX="${LANG_PREFIX:-0}"             # 1 enables --lang-prefix
 TEXT_OUTPUT="${TEXT_OUTPUT:-text}"          # text | jsonl (only relevant in mode=text)
-FLAVOR="${FLAVOR:-a10g-small}"
+FLAVOR="${FLAVOR:-a10g-small}"              # A10G small: 1$/h; runtime for a 15MB work: c. 3.5h
 TIMEOUT="${TIMEOUT:-12h}"
 
 # Model repos and local download locations inside the job workspace.
