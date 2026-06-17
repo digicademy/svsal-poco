@@ -990,7 +990,13 @@ def _apply_cross_line_choice(
             if choice_el.tag == _tag("choice"):
                 existing_expan = choice_el.find(_tag("expan"))
                 if existing_expan is not None:
-                    _add_resp_to_element(existing_expan, f"#{EXPANSION_MODEL}")
+                    existing_text = _inner_text(existing_expan)
+                    # Only add model resp when model agrees with existing expansion
+                    if exp_text == existing_text or _texts_equivalent(exp_text, existing_text):
+                        _add_resp_to_element(existing_expan, f"#{EXPANSION_MODEL}")
+                    else:
+                        # Disagreement: flag for manual inspection
+                        existing_expan.set("cert", "low")
         return
 
     l1_text = line1.plain_text
@@ -1495,7 +1501,8 @@ def _merge_with_existing_choice(
     1. Strip punctuation/tail text from the expansion to isolate the word
     2. Compare with the existing <expan> text
     3. If they agree: add the new model's resp to the existing <expan>
-    4. If they disagree: create nested <expan> elements (rare case)
+    4. If they disagree: flag with @cert="low" for manual inspection
+       (do NOT add the model identifier to @resp)
 
     Returns the existing <choice> element, or None if skipped.
     """
@@ -1547,11 +1554,11 @@ def _merge_with_existing_choice(
             _add_resp_to_element(existing_expan, f"#{EXPANSION_MODEL}")
             return choice_el
 
-        # Expansions disagree — rare case: create nested expan elements
-        # <expan resp="#auto"><choice><expan resp="...">A</expan><expan resp="...">B</expan></choice></expan>
-        # For simplicity, just add the new resp; the existing expansion is
-        # considered authoritative (rule-based, 100% reliable per problem statement)
-        _add_resp_to_element(existing_expan, f"#{EXPANSION_MODEL}")
+        # Expansions disagree — flag for manual inspection without adding
+        # the model's resp.  The existing (rule-based) expansion is kept
+        # unchanged; @cert="low" signals that the model produced a different
+        # reading and the element should be reviewed by a human editor.
+        existing_expan.set("cert", "low")
         return choice_el
 
 

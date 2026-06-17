@@ -279,5 +279,84 @@ class TestPunctuationPreserved(unittest.TestCase):
                        f"Period should be in choice tail, got: {choice.tail!r}")
 
 
+class TestDisagreementFlaggedForReview(unittest.TestCase):
+    """Test that model disagreement flags for manual inspection."""
+
+    def test_disagreeing_expansion_flagged_cert_low(self):
+        """When model expands differently, flag with @cert='low' and no model resp."""
+        body = (
+            'tam ex tertio '
+            '<choice resp="#auto" xml:id="W0100-00-0493-ce-45eb">'
+            '<abbr>politicor<g ref="#charu0303">\u0169</g></abbr>'
+            '<expan resp="#CR #auto">politicorum</expan>'
+            '</choice>, qu<g ref="#chara0300">\u00e0</g>m'
+        )
+        xml_input = _make_tei_doc(body)
+
+        # Model expands "politicorũ" → "politicorUNDO" (DIFFERENT from existing)
+        pipeline = _expanding_pipeline({"politicor\u0169": "politicorUNDO"})
+        result = process_tei_xml(xml_input, pipeline)
+
+        tree = etree.fromstring(result.encode())
+
+        # Find the choice element
+        body_choices = [
+            c for c in tree.findall(f".//{{{TEI_NS}}}choice")
+            if c.get(f"{{{XML_NS}}}id") == "W0100-00-0493-ce-45eb"
+        ]
+        self.assertEqual(len(body_choices), 1, "Should have exactly one choice element")
+
+        choice = body_choices[0]
+        expan = choice.find(f"{{{TEI_NS}}}expan")
+        self.assertIsNotNone(expan)
+
+        # The model identifier should NOT be in resp (expansion was discarded)
+        self.assertNotIn(f"#{EXPANSION_MODEL}", expan.get("resp", ""))
+
+        # The original resp should still be there
+        self.assertIn("#CR", expan.get("resp", ""))
+        self.assertIn("#auto", expan.get("resp", ""))
+
+        # Should be flagged with cert="low" for manual inspection
+        self.assertEqual(expan.get("cert"), "low")
+
+        # Existing expansion text should be unchanged
+        expan_text = "".join(expan.itertext())
+        self.assertEqual(expan_text, "politicorum")
+
+    def test_agreeing_expansion_no_cert_flag(self):
+        """When model agrees with existing expan, no @cert flag is added."""
+        body = (
+            'tam ex tertio '
+            '<choice resp="#auto" xml:id="W0100-00-0493-ce-45eb">'
+            '<abbr>politicor<g ref="#charu0303">\u0169</g></abbr>'
+            '<expan resp="#CR #auto">politicorum</expan>'
+            '</choice>, qu<g ref="#chara0300">\u00e0</g>m'
+        )
+        xml_input = _make_tei_doc(body)
+
+        # Model expands "politicorũ" → "politicorum" (SAME as existing)
+        pipeline = _expanding_pipeline({"politicor\u0169": "politicorum"})
+        result = process_tei_xml(xml_input, pipeline)
+
+        tree = etree.fromstring(result.encode())
+
+        body_choices = [
+            c for c in tree.findall(f".//{{{TEI_NS}}}choice")
+            if c.get(f"{{{XML_NS}}}id") == "W0100-00-0493-ce-45eb"
+        ]
+        self.assertEqual(len(body_choices), 1)
+
+        choice = body_choices[0]
+        expan = choice.find(f"{{{TEI_NS}}}expan")
+        self.assertIsNotNone(expan)
+
+        # Model resp should be added (agreement)
+        self.assertIn(f"#{EXPANSION_MODEL}", expan.get("resp", ""))
+
+        # No cert flag (no disagreement)
+        self.assertIsNone(expan.get("cert"))
+
+
 if __name__ == "__main__":
     unittest.main()
