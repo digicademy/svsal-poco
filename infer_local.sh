@@ -30,6 +30,8 @@ BATCH_SIZE="16"
 LANG_PREFIX="0"
 TEXT_OUTPUT="text"   # for --mode text: text|jsonl
 PYTHON_BIN="python"
+SAVE_INTERMEDIATE="0"
+INFER_JSONL=""
 
 usage() {
   cat <<'EOF'
@@ -68,6 +70,11 @@ Optional:
   --text-output         Only for mode=text; text (default) or jsonl
   --python              Python executable (default: python)
   --script              Path to infer_handler.py
+  --save-intermediate   xml mode: save <output_stem>.extracted.jsonl and
+                        <output_stem>.inferred.jsonl alongside the output XML.
+                        Needed to enable later re-injection-only runs.
+  --infer-jsonl <path>  xml mode: skip model loading and inference; re-inject
+                        from a pre-saved *.inferred.jsonl file (no GPU needed).
 
 Examples:
   # Plaintext file -> expanded plaintext file
@@ -119,6 +126,8 @@ while [[ $# -gt 0 ]]; do
     --text-output) TEXT_OUTPUT="${2:-}"; shift 2 ;;
     --python) PYTHON_BIN="${2:-}"; shift 2 ;;
     --script) PY_SCRIPT="${2:-}"; shift 2 ;;
+    --save-intermediate) SAVE_INTERMEDIATE="1"; shift 1 ;;
+    --infer-jsonl) INFER_JSONL="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown argument: $1 (use --help)" ;;
   esac
@@ -130,7 +139,6 @@ done
 [[ -n "$MODE" ]] || die "--mode is required"
 [[ -n "$INPUT_FILE" ]] || die "--input is required"
 [[ -n "$OUTPUT_FILE" ]] || die "--output is required"
-# [[ -n "$BYT5_MODEL_DIR" ]] || die "--byt5-model-dir is required"
 
 [[ -n "$BOUNDARY_MODEL_DIR" && -n "$BOUNDARY_MODEL_NAME" ]] \
   && die "boundary model must be specified with --boundary-model-dir or --boundary-model-name"
@@ -152,15 +160,15 @@ done
 [[ -f "$INPUT_FILE" ]] || die "Input file does not exist: $INPUT_FILE"
 [[ -f "$PY_SCRIPT" ]] || die "Python handler not found: $PY_SCRIPT"
 
-# boundary dir checks (strict)
+# boundary/model dir checks — skipped when re-injecting from a saved JSONL
+if [[ -z "$INFER_JSONL" ]]; then
                                       [[ "$BOUNDARY_MODEL_DIR" != "" && ! -d ${BOUNDARY_MODEL_DIR} ]]                   && die "Boundary o2model dir not found: $BOUNDARY_MODEL_DIR"
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/best_model.pt" ]]     && die "Missing ${BOUNDARY_MODEL_DIR}/best_model.pt"
 [[ "$BOUNDARY_MODEL_TYPE" == "canine" && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/threshold.json" ]]    && die "Missing ${BOUNDARY_MODEL_DIR}/threshold.json"
 [[ "$BOUNDARY_MODEL_TYPE" == "flair"  && "$BOUNDARY_MODEL_DIR" != "" && ! -f "${BOUNDARY_MODEL_DIR}/pytorch_model.bin" ]] && die "Missing $BOUNDARY_MODEL_DIR/pytorch_model.bin"
-
 [[ "$BYT5_MODEL_DIR" != "" && ! -d "$BYT5_MODEL_DIR" ]]                                     && die "Abbrev/BYT5 model dir not found: ${BYT5_MODEL_DIR}"
 [[ "$BYT5_MODEL_DIR" != "" && ! -f "${BYT5_MODEL_DIR}/final_model/model.safetensors" ]]     && die "Missing ${BYT5_MODEL_DIR}/final_model/model.safetensors"
-
+fi
 
 # output directory
 OUT_DIR="$(dirname "$OUTPUT_FILE")"
@@ -199,6 +207,14 @@ fi
 
 if [[ "$MODE" == "text" ]]; then
   CMD+=(--text-output "$TEXT_OUTPUT")
+fi
+
+if [[ "$SAVE_INTERMEDIATE" == "1" ]]; then
+  CMD+=(--save-intermediate)
+fi
+
+if [[ -n "$INFER_JSONL" ]]; then
+  CMD+=(--infer-jsonl "$INFER_JSONL")
 fi
 
 echo "Running:"

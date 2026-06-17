@@ -17,6 +17,7 @@ BOUNDARY_MODEL_TYPE="${BOUNDARY_MODEL_TYPE:-flair}"   # canine | flair
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LANG_PREFIX="${LANG_PREFIX:-0}"             # 1 enables --lang-prefix
 TEXT_OUTPUT="${TEXT_OUTPUT:-text}"          # text | jsonl (only relevant in mode=text)
+SAVE_INTERMEDIATE="${SAVE_INTERMEDIATE:-1}" # 1 = save .extracted.jsonl + .inferred.jsonl alongside output XML
 FLAVOR="${FLAVOR:-a10g-small}"              # A10G small: 1$/h; runtime for a 15MB work: c. 3.5h
 TIMEOUT="${TIMEOUT:-12h}"
 
@@ -52,6 +53,8 @@ Options:
   --batch-size <int>
   --text-output <text|jsonl>
   --lang-prefix
+  --save-intermediate           # Save .extracted.jsonl + .inferred.jsonl per file (default: on)
+  --no-save-intermediate        # Disable intermediate saving
   --flavor <t4-small|t4-medium|a10g-small|a10g-large|a10g-largex2|a10g-largex4|a100-large>
   --timeout <duration>              # e.g. 12h
   -h, --help
@@ -84,6 +87,8 @@ while [ "$#" -gt 0 ]; do
     --batch-size) BATCH_SIZE="${2:-}"; shift 2 ;;
     --text-output) TEXT_OUTPUT="${2:-}"; shift 2 ;;
     --lang-prefix) LANG_PREFIX=1; shift 1 ;;
+    --save-intermediate) SAVE_INTERMEDIATE=1; shift 1 ;;
+    --no-save-intermediate) SAVE_INTERMEDIATE=0; shift 1 ;;
     --flavor) FLAVOR="${2:-}"; shift 2 ;;
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -117,6 +122,9 @@ if [ "$BOUNDARY_MODEL_TYPE" != "canine" ]; then
 fi
 if [ "$LANG_PREFIX" = "1" ]; then
   EXTRA_ARGS="$EXTRA_ARGS --lang-prefix"
+fi
+if [ "$SAVE_INTERMEDIATE" = "1" ]; then
+  EXTRA_ARGS="$EXTRA_ARGS --save-intermediate"
 fi
 
 # Function to extract filename from Content-Disposition header (simplified and robust)
