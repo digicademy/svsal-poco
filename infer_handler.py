@@ -23,10 +23,18 @@ Usage examples:
       --boundary-model-dir ./canine-salamanca-boundary-classifier \
       --byt5-model-dir ./byt5-salamanca-abbr
 
-  # XML from file
+  # XML from file — also save intermediate JSONL for later re-injection debugging
   python infer_handler.py --mode xml --input-file input.xml --output-file output.xml \
       --boundary-model-dir ./canine-salamanca-boundary-classifier \
-      --byt5-model-dir ./byt5-salamanca-abbr
+      --byt5-model-dir ./byt5-salamanca-abbr \
+      --save-intermediate
+  # writes output.extracted.jsonl (rows from XML) and output.inferred.jsonl (ML results)
+
+  # Re-inject from saved JSONL only — no models / GPU needed; iterates on tei_roundtrip.py
+  python infer_handler.py --mode xml --input-file input.xml --output-file output.xml \
+      --infer-jsonl output.inferred.jsonl
+  # or use the convenience wrapper:
+  #   ./reinject_xml.sh --input input.xml --infer-jsonl output.inferred.jsonl --output output.xml
 """
 
 import argparse
@@ -206,10 +214,35 @@ def run_pipeline_on_rows(rows, output_format, models, batch_size=16,
             os.unlink(output_path)
 
 
-def run_xml(xml_text, models, batch_size=16):
+def run_xml(xml_text, models, batch_size=16, save_intermediate_path: str | None = None):
+    """Run XML roundtrip inference, optionally persisting intermediate data.
+
+    Args:
+        xml_text:               Input TEI XML string.
+        models:                 Tuple returned by :func:`load_models`.
+        batch_size:             Forwarded to :func:`run_pipeline`.
+        save_intermediate_path: Optional path *stem* (no extension).
+                                When given, two sibling files are written:
+                                ``<stem>.extracted.jsonl`` — rows extracted
+                                from the XML before inference, and
+                                ``<stem>.inferred.jsonl``  — rows produced
+                                by the pipeline (contains ``expanded_text``
+                                and ``predicted_nonbreaking_next_line``).
+                                The ``.inferred.jsonl`` file is what
+                                :func:`run_xml_from_inferred` needs for a
+                                re-injection-only debug run.
+    """
     boundary_detector, boundary_threshold, byt5_model, byt5_tokenizer = models
 
     def pipeline_fn(line_rows, pre_annotated=None):
+        # Persist rows extracted from XML (before inference)
+        if save_intermediate_path:
+            extracted_path = save_intermediate_path + ".extracted.jsonl"
+            with open(extracted_path, "w", encoding="utf-8") as fex:
+                for row in line_rows:
+                    fex.write(json.dumps(row, ensure_ascii=False) + "\n")
+            print(f"[intermediate] extracted rows → {extracted_path}", file=sys.stderr)
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as tmp:
             input_path = tmp.name
             for row in line_rows:
@@ -235,6 +268,14 @@ def run_xml(xml_text, models, batch_size=16):
                     if l:
                         out_rows.append(json.loads(l))
 
+            # Persist full inference output rows
+            if save_intermediate_path:
+                inferred_path = save_intermediate_path + ".inferred.jsonl"
+                with open(inferred_path, "w", encoding="utf-8") as fin:
+                    for row in out_rows:
+                        fin.write(json.dumps(row, ensure_ascii=False) + "\n")
+                print(f"[intermediate] inferred rows  → {inferred_path}", file=sys.stderr)
+
             expanded_dict = {r["id"]: r.get("expanded_text", r["source_sic"]) for r in out_rows}
             boundary_dict = {
                 r["id"]: r["predicted_nonbreaking_next_line"]
@@ -250,6 +291,59 @@ def run_xml(xml_text, models, batch_size=16):
     return process_tei_xml(xml_text, pipeline_fn)
 
 
+def run_xml_from_inferred(xml_text: str, inferred_jsonl: str) -> str:
+    """Re-injection only: rebuild XML from a pre-saved inference JSONL.
+
+    Reads the ``*.inferred.jsonl`` file written by :func:`run_xml` when
+    ``save_intermediate_path`` is set, reconstructs *expanded_dict* and
+    *boundary_dict*, and calls :func:`process_tei_xml` with a stub
+    ``pipeline_fn`` that ignores the live rows and returns the cached
+    results.  No models are loaded; no GPU is required.
+
+    Args:
+        xml_text:       Original TEI XML string (same file used for inference).
+        inferred_jsonl: Path to the ``*.inferred.jsonl`` intermediate file.
+
+    Returns:
+        Re-injected TEI XML string.
+    """
+    import warnings
+
+    out_rows: list[dict] = []
+    with open(inferred_jsonl, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out_rows.append(json.loads(line))
+
+    if not out_rows:
+        raise ValueError(f"No rows found in {inferred_jsonl}")
+
+    expanded_dict = {r["id"]: r.get("expanded_text", r["source_sic"]) for r in out_rows}
+    boundary_dict = {
+        r["id"]: r["predicted_nonbreaking_next_line"]
+        for r in out_rows if r.get("predicted_nonbreaking_next_line")
+    }
+
+    def pipeline_fn(line_rows, pre_annotated=None):
+        # Sanity-check: IDs in the re-parsed XML must match the stored JSONL.
+        # A mismatch means the XML and JSONL are out of sync.
+        live_ids   = {r["id"] for r in line_rows}
+        stored_ids = set(expanded_dict)
+        if live_ids != stored_ids:
+            missing = sorted(live_ids   - stored_ids)[:5]
+            extra   = sorted(stored_ids - live_ids)[:5]
+            warnings.warn(
+                "[reinject] ID mismatch between XML rows and stored JSONL.\n"
+                f"  IDs in XML but not in JSONL : {missing}{'…' if len(missing) == 5 else ''}\n"
+                f"  IDs in JSONL but not in XML : {extra  }{'…' if len(extra)   == 5 else ''}",
+                stacklevel=2,
+            )
+        return expanded_dict, boundary_dict
+
+    return process_tei_xml(xml_text, pipeline_fn)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Local SvSal PoCo inference handler")
     parser.add_argument("--mode", choices=["text", "jsonl", "xml"], required=True)
@@ -260,7 +354,7 @@ def main():
     parser.add_argument("--boundary-model-type", choices=["canine", "flair"], default="canine",
                         help="Type of boundary detector (default: canine)")
     parser.add_argument("--boundary-model-name", help="HF model name for flair detector")
-    parser.add_argument("--byt5-model-dir", required=True, help="Dir/loadable HF path for ByT5 model")
+    parser.add_argument("--byt5-model-dir", default=None, help="Dir/loadable HF path for ByT5 model")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lang-prefix", action="store_true", default=False)
 
@@ -272,25 +366,61 @@ def main():
         help="For plaintext input: output expanded plaintext (default) or output JSONL rows",
     )
 
+    # for --mode xml: intermediate checkpointing
+    parser.add_argument(
+        "--save-intermediate",
+        metavar="PATH_STEM",
+        nargs="?",
+        const="",
+        default=None,
+        help=(
+            "xml mode only: persist intermediate JSONL files alongside the output. "
+            "Writes <stem>.extracted.jsonl (rows stripped from XML before inference) "
+            "and <stem>.inferred.jsonl (full pipeline output with expanded_text and "
+            "predicted boundaries). When given without a value, the stem is derived "
+            "from --output-file. The .inferred.jsonl is what --infer-jsonl expects."
+        ),
+    )
+    parser.add_argument(
+        "--infer-jsonl",
+        metavar="PATH",
+        default=None,
+        help=(
+            "xml mode only: skip model loading and inference entirely; re-inject "
+            "results from this pre-saved *.inferred.jsonl file. Useful for "
+            "iterating on tei_roundtrip.py without re-running the 3.5h GPU job. "
+            "When set, --boundary-model-dir / --byt5-model-dir are not needed."
+        ),
+    )
+
     args = parser.parse_args()
 
-    # Validate boundary model arguments
-    # Both --boundary-model-dir and --boundary-model-name work for both model types
-    if args.boundary_model_type == "canine":
-        if not args.boundary_model_dir and not args.boundary_model_name:
-            parser.error("--boundary-model-dir or --boundary-model-name is required for canine detector")
-    elif args.boundary_model_type == "flair":
-        if not args.boundary_model_dir and not args.boundary_model_name:
-            # Use default for flair if neither is specified
-            args.boundary_model_name = "mschonhardt/latin-contextual-lb-detector"
+    # Re-injection mode bypasses all model loading
+    reinject_only = args.mode == "xml" and bool(args.infer_jsonl)
+
+    if not reinject_only:
+        if not args.byt5_model_dir:
+            parser.error("--byt5-model-dir is required (omit only when using --infer-jsonl)")
+        # Validate boundary model arguments
+        # Both --boundary-model-dir and --boundary-model-name work for both model types
+        if args.boundary_model_type == "canine":
+            if not args.boundary_model_dir and not args.boundary_model_name:
+                parser.error("--boundary-model-dir or --boundary-model-name is required for canine detector")
+        elif args.boundary_model_type == "flair":
+            if not args.boundary_model_dir and not args.boundary_model_name:
+                # Use default for flair if neither is specified
+                args.boundary_model_name = "mschonhardt/latin-contextual-lb-detector"
+
+        models = load_models(
+            args.boundary_model_dir,
+            args.byt5_model_dir,
+            args.boundary_model_type,
+            args.boundary_model_name,
+        )
+    else:
+        models = None  # not needed for re-injection
 
     raw = read_input(args)
-    models = load_models(
-        args.boundary_model_dir,
-        args.byt5_model_dir,
-        args.boundary_model_type,
-        args.boundary_model_name,
-    )
 
     if args.mode == "jsonl":
         # passthrough: run pipeline directly on provided JSONL
@@ -331,7 +461,20 @@ def main():
         write_output(out, args.output_file)
 
     elif args.mode == "xml":
-        out_xml = run_xml(raw, models=models, batch_size=args.batch_size)
+        if reinject_only:
+            out_xml = run_xml_from_inferred(raw, inferred_jsonl=args.infer_jsonl)
+        else:
+            # Derive intermediate stem when --save-intermediate is present
+            save_stem: str | None = None
+            if args.save_intermediate is not None:
+                if args.save_intermediate:          # explicit path stem provided
+                    save_stem = args.save_intermediate
+                elif args.output_file:              # derive from output path
+                    save_stem = str(Path(args.output_file).with_suffix(""))
+                else:                               # stdout mode: use cwd
+                    save_stem = "infer_intermediate"
+            out_xml = run_xml(raw, models=models, batch_size=args.batch_size,
+                              save_intermediate_path=save_stem)
         write_output(out_xml, args.output_file)
 
 

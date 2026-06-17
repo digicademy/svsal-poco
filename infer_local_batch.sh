@@ -22,6 +22,7 @@ BATCH_SIZE="16"
 LANG_PREFIX="0"
 TEXT_OUTPUT="text"
 PYTHON_BIN="python"
+SAVE_INTERMEDIATE="0"
 
 # Comma-separated extension overrides (without dots), optional.
 # If omitted, defaults by mode:
@@ -47,7 +48,8 @@ Usage:
     [--text-output <text|jsonl>] \
     [--python <python_bin>] \
     [--extensions <csv_no_dot>] \
-    [--dry-run]
+    [--dry-run] \
+    [--save-intermediate]
 
 Required:
   --mode
@@ -115,6 +117,7 @@ while [[ $# -gt 0 ]]; do
     --python) PYTHON_BIN="${2:-}"; shift 2 ;;
     --extensions) EXTENSIONS="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN="1"; shift 1 ;;
+    --save-intermediate) SAVE_INTERMEDIATE="1"; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown argument: $1 (use --help)" ;;
   esac
@@ -249,6 +252,10 @@ for in_file in "${FILES[@]}"; do
 
   if [[ "$LANG_PREFIX" == "1" ]]; then
     cmd+=(--lang-prefix)
+  fi
+
+  if [[ "$SAVE_INTERMEDIATE" == "1" ]]; then
+    cmd+=(--save-intermediate)
   fi
 
   if [[ "$DRY_RUN" == "1" ]]; then
