@@ -63,6 +63,37 @@ def _is_punctuation_only_change(orig: str, expanded: str) -> bool:
     orig_letters = "".join(c for c in orig if c.isalpha())
     exp_letters = "".join(c for c in expanded if c.isalpha())
     return orig_letters == exp_letters
+
+
+def _is_glyph_variant_only_change(orig: str, expanded: str) -> bool:
+    """
+    Return True if the only differences between orig and expanded are
+    glyph variants (ſ/s, u/v, è/e, etc.) or combining-mark stripping —
+    i.e. NOT real abbreviation expansions.
+
+    This prevents the model's character normalization (e.g. long-s → s,
+    accented vowels → plain) from being treated as abbreviation changes.
+    """
+    import unicodedata as _ud
+
+    # Canonical mapping: for each equivalence pair, pick one representative
+    _CANON = {}
+    for a, b in EQUIV.items():
+        # Use the one that sorts lower as canonical
+        canon = min(a, b)
+        _CANON[a] = canon
+        _CANON[b] = canon
+
+    def _normalize(s: str) -> str:
+        """Normalize to canonical form: strip combining marks, map equivalents."""
+        out: list[str] = []
+        for ch in _ud.normalize("NFD", s):
+            if _ud.category(ch).startswith("M"):
+                continue  # skip combining marks
+            out.append(_CANON.get(ch, ch))
+        return "".join(out)
+
+    return _normalize(orig) == _normalize(expanded)
 EQUIV = {
     'u': 'v', 'v': 'u',
     'U': 'V', 'V': 'U',
@@ -775,6 +806,10 @@ def _apply_chain_expansion(
         if _is_punctuation_only_change(orig_text, exp_text):
             continue
 
+        # Skip changes that are only glyph variants (ſ→s, è→e, etc.)
+        if _is_glyph_variant_only_change(orig_text, exp_text):
+            continue
+
         # Check if change spans a separator → cross-line
         crossed_seps = [s for s in sep_positions if orig_start <= s < orig_end]
 
@@ -1323,6 +1358,10 @@ def _apply_line_expansion(
         if _is_punctuation_only_change(orig_text, exp_text):
             continue
 
+        # Skip changes that are only glyph variants (ſ→s, è→e, etc.)
+        if _is_glyph_variant_only_change(orig_text, exp_text):
+            continue
+
         # Check if any notes fall inside this change range
         affected_notes = [
             n for n in line.notes
@@ -1430,15 +1469,25 @@ def _find_changes(
 
 
 def _expand_left(text: str, pos: int) -> int:
-    """Expand pos leftward to the start of the current word."""
-    while pos > 0 and not text[pos - 1].isspace():
+    """Expand pos leftward to the start of the current word.
+
+    Treats whitespace and LINE_SEP as word boundaries so that
+    word-boundary expansion in concatenated chain text never crosses
+    the artificial line separator.
+    """
+    while pos > 0 and not text[pos - 1].isspace() and text[pos - 1] != LINE_SEP:
         pos -= 1
     return pos
 
 
 def _expand_right(text: str, pos: int) -> int:
-    """Expand pos rightward to the end of the current word."""
-    while pos < len(text) and not text[pos].isspace():
+    """Expand pos rightward to the end of the current word.
+
+    Treats whitespace and LINE_SEP as word boundaries so that
+    word-boundary expansion in concatenated chain text never crosses
+    the artificial line separator.
+    """
+    while pos < len(text) and not text[pos].isspace() and text[pos] != LINE_SEP:
         pos += 1
     return pos
 

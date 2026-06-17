@@ -358,5 +358,120 @@ class TestDisagreementFlaggedForReview(unittest.TestCase):
         self.assertIsNone(expan.get("cert"))
 
 
+class TestNoSpuriousChoiceFromGlyphVariants(unittest.TestCase):
+    """Test that glyph-variant normalization does NOT produce spurious choices."""
+
+    def test_chain_with_existing_choice_no_spurious_cross_line_choices(self):
+        """
+        Regression test: when a chain contains a pre-existing <choice> and the
+        model only expands the real abbreviation (magnũ→magnum) but normalizes
+        glyphs elsewhere (ſ→s, è→e), no spurious <choice> elements should be
+        created for the glyph-normalized tokens.
+        """
+        body = (
+            'hoc'
+            '<note anchored="false" place="margin" xml:id="W0100-00-0102-nm-0675">'
+            '<p xml:id="W0100-00-0102-pa-0a9b">'
+            '<lb xml:id="W0100-00-0102-lb-m006"/>'
+            '<hi rendition="#it">Ephe. 5.</hi></p></note>'
+            '<lb xml:id="W0100-00-0102-lb-2017"/>'
+            'magn<g ref="#charu0303">\u0169</g> e<g ref="#char017f">\u017f</g>t in '
+            '<choice xml:id="W0100-00-0102-ce-0e0d">'
+            '<abbr>Ch<g ref="#charr0303">r\u0303</g>o</abbr>'
+            '<expan resp="#auto">Christo</expan></choice>'
+            ', <g ref="#char0026">&amp;</g> ec'
+            '<lb xml:id="W0100-00-0102-lb-2018"/>'
+            'cle<g ref="#char017f">\u017f</g>ia. apert<g ref="#chare0300">\u00e8</g>'
+            ' de<g ref="#char017f">\u017f</g>ignauit'
+            '<lb xml:id="W0100-00-0102-lb-2019"/>'
+            'matrimonium carnale'
+        )
+        xml_input = _make_tei_doc(body)
+
+        # Pipeline that expands only "magnũ"→"magnum" and "Chr̃o"→"Christo",
+        # and normalizes ſ→s, è→e (as the ByT5 model tends to do)
+        def pipeline(rows, pre_annotated):
+            expanded = {}
+            boundaries = {}
+            for row in rows:
+                text = row["source_sic"]
+                # Expand real abbreviation
+                text = text.replace("magn\u0169", "magnum")
+                # Expand existing choice's abbr text (model sees abbr text)
+                text = text.replace("Chr\u0303o", "Christo")
+                # Model also normalizes glyphs (NOT real expansions)
+                text = text.replace("\u017f", "s")  # long-s → s
+                text = text.replace("\u00e8", "e")  # è → e
+                expanded[row["id"]] = text
+            # Boundary prediction: lb-2017 → lb-2018 (nonbreaking, for ec-clesia)
+            boundaries["W0100-00-0102-lb-2017"] = "W0100-00-0102-lb-2018"
+            return expanded, boundaries
+        result = process_tei_xml(xml_input, pipeline)
+
+        tree = etree.fromstring(result.encode())
+
+        # Find all <choice> elements in the body
+        all_choices = tree.findall(f".//{{{TEI_NS}}}choice")
+
+        # We expect:
+        # 1. The pre-existing choice W0100-00-0102-ce-0e0d (preserved)
+        # 2. A new choice for magnũ→magnum
+        # 3. A cross-line choice for ec/clesia→ecclesia
+        # But NOT any spurious choices for "apertè", "deſignauit", etc.
+
+        # Filter to body choices only (exclude appInfo)
+        body_el = tree.find(f".//{{{TEI_NS}}}body")
+        body_choices = body_el.findall(f".//{{{TEI_NS}}}choice")
+
+        # Should have at most 3 choices (existing + magnũ + ec/clesia)
+        self.assertLessEqual(
+            len(body_choices), 3,
+            f"Expected at most 3 <choice> elements but found {len(body_choices)}. "
+            f"Spurious choices were introduced for glyph-variant-only changes."
+        )
+
+        # The existing choice should still be present
+        existing = [c for c in body_choices
+                    if c.get(f"{{{XML_NS}}}id") == "W0100-00-0102-ce-0e0d"]
+        self.assertEqual(len(existing), 1, "Pre-existing choice was lost")
+
+        # Verify no expan text contains garbage like "ecmagnum" or "Christo, &"
+        for choice in body_choices:
+            expan = choice.find(f"{{{TEI_NS}}}expan")
+            if expan is not None:
+                expan_text = "".join(expan.itertext())
+                self.assertNotIn(
+                    "ecmagnum", expan_text,
+                    "Spurious content in <expan>: earlier text leaked in"
+                )
+
+    def test_glyph_only_change_filtered(self):
+        """Single-line glyph-only changes (ſ→s) should NOT create choice."""
+        body = (
+            'cle<g ref="#char017f">\u017f</g>ia'
+        )
+        xml_input = _make_tei_doc(body)
+
+        # Model normalizes ſ→s
+        def pipeline(rows, pre_annotated):
+            expanded = {}
+            for row in rows:
+                text = row["source_sic"]
+                text = text.replace("\u017f", "s")
+                expanded[row["id"]] = text
+            return expanded, {}
+        result = process_tei_xml(xml_input, pipeline)
+
+        tree = etree.fromstring(result.encode())
+        body_el = tree.find(f".//{{{TEI_NS}}}body")
+        body_choices = body_el.findall(f".//{{{TEI_NS}}}choice")
+
+        # No choice should be introduced for a glyph-only change
+        self.assertEqual(
+            len(body_choices), 0,
+            "Glyph-only change (ſ→s) should not introduce a <choice> element"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
