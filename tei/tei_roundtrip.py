@@ -966,6 +966,39 @@ def _apply_cross_line_choice(
     lb1_start, _ = line_boundaries[start_line_idx]
     lb2_start, _ = line_boundaries[end_line_idx]
 
+    # Check if the change overlaps with existing <choice> elements.
+    # If so, merge with the existing choice rather than creating a new one.
+    local_start_l1 = orig_start - lb1_start
+    local_end_l1 = min(orig_end, lb1_start + len(line1.plain_text)) - lb1_start
+    local_start_l2 = max(0, orig_start - lb2_start)
+    local_end_l2 = orig_end - lb2_start
+
+    choice_runs_l1 = [
+        r for r in line1.text_runs
+        if r.from_choice and r.plain_end > local_start_l1 and r.plain_start < local_end_l1
+    ]
+    choice_runs_l2 = [
+        r for r in line2.text_runs
+        if r.from_choice and r.plain_end > local_start_l2 and r.plain_start < local_end_l2
+    ]
+
+    if choice_runs_l1 or choice_runs_l2:
+        # The change overlaps with pre-existing choice elements.
+        # Merge resp with existing choice rather than creating a new wrapper.
+        for cr in choice_runs_l1 + choice_runs_l2:
+            choice_el = cr.node
+            if choice_el.tag == _tag("choice"):
+                existing_expan = choice_el.find(_tag("expan"))
+                if existing_expan is not None:
+                    existing_text = _inner_text(existing_expan)
+                    # Only add model resp when model agrees with existing expansion
+                    if exp_text == existing_text or _texts_equivalent(exp_text, existing_text):
+                        _add_resp_to_element(existing_expan, f"#{EXPANSION_MODEL}")
+                    else:
+                        # Disagreement: flag for manual inspection
+                        existing_expan.set("cert", "low")
+        return
+
     l1_text = line1.plain_text
     l2_text = line2.plain_text
 
@@ -1452,6 +1485,105 @@ def _is_intoken_element(node: etree._Element) -> bool:
     return local == "g"
 
 
+def _merge_with_existing_choice(
+    line:          ExtractedLine,
+    affected_runs: list[TextRun],
+    choice_runs:   list[TextRun],
+    orig_start:    int,
+    orig_end:      int,
+    expan_text:    str,
+) -> Optional[etree._Element]:
+    """
+    Merge a new expansion with an existing <choice> element rather than nesting.
+
+    When word-boundary expansion includes text from a pre-existing <choice>
+    along with surrounding punctuation/text, we:
+    1. Strip punctuation/tail text from the expansion to isolate the word
+    2. Compare with the existing <expan> text
+    3. If they agree: add the new model's resp to the existing <expan>
+    4. If they disagree: flag with @cert="low" for manual inspection
+       (do NOT add the model identifier to @resp)
+
+    Returns the existing <choice> element, or None if skipped.
+    """
+    # The choice_run's node IS the <choice> element itself
+    choice_el = choice_runs[0].node
+    if choice_el.tag != _tag("choice"):
+        return None
+
+    # Get existing expan text
+    existing_expan = choice_el.find(_tag("expan"))
+    if existing_expan is None:
+        return None
+    existing_expan_text = _inner_text(existing_expan)
+
+    # Determine what portion of expan_text corresponds to the choice part
+    # vs. surrounding punctuation/text that was pulled in by word boundary expansion.
+    # The choice_run covers [choice_run.plain_start, choice_run.plain_end) in the
+    # original text. The non-choice affected runs are punctuation/surrounding text.
+    #
+    # In the original: "politicorũ," — choice covers "politicorũ", comma is tail
+    # In the expanded: "politicorum," — we need to extract "politicorum"
+    #
+    # Strategy: identify leading/trailing non-choice text in orig, then strip the
+    # same from expan_text.
+    choice_orig_start = choice_runs[0].plain_start
+    choice_orig_end = choice_runs[-1].plain_end
+
+    # Text before the choice portion in the affected range
+    leading_non_choice = line.plain_text[orig_start:max(orig_start, choice_orig_start)]
+    # Text after the choice portion in the affected range
+    trailing_non_choice = line.plain_text[min(orig_end, choice_orig_end):orig_end]
+
+    # The expansion should have the same leading/trailing non-choice text
+    # (since the model typically doesn't change punctuation)
+    exp_choice_text = expan_text
+    if leading_non_choice and exp_choice_text.startswith(leading_non_choice):
+        exp_choice_text = exp_choice_text[len(leading_non_choice):]
+    if trailing_non_choice and exp_choice_text.endswith(trailing_non_choice):
+        exp_choice_text = exp_choice_text[:-len(trailing_non_choice)]
+
+    # Compare the isolated expansion with the existing expan text
+    if exp_choice_text == existing_expan_text:
+        # Expansions agree — just add the new model's resp to existing expan
+        _add_resp_to_element(existing_expan, f"#{EXPANSION_MODEL}")
+        return choice_el
+    else:
+        # Check if they agree ignoring glyph differences (e.g. long-s vs s)
+        if _texts_equivalent(exp_choice_text, existing_expan_text):
+            _add_resp_to_element(existing_expan, f"#{EXPANSION_MODEL}")
+            return choice_el
+
+        # Expansions disagree — flag for manual inspection without adding
+        # the model's resp.  The existing (rule-based) expansion is kept
+        # unchanged; @cert="low" signals that the model produced a different
+        # reading and the element should be reviewed by a human editor.
+        existing_expan.set("cert", "low")
+        return choice_el
+
+
+def _add_resp_to_element(el: etree._Element, new_resp: str) -> None:
+    """Add a resp token to an element's @resp attribute if not already present."""
+    current = el.get("resp", "")
+    tokens = current.split() if current else []
+    if new_resp not in tokens:
+        tokens.append(new_resp)
+        el.set("resp", " ".join(tokens))
+
+
+def _texts_equivalent(a: str, b: str) -> bool:
+    """
+    Check if two texts are equivalent ignoring glyph variants
+    (long-s/s, u/v, etc.).
+    """
+    if len(a) != len(b):
+        return False
+    for ca, cb in zip(a, b):
+        if ca != cb and not chars_match(ca, cb):
+            return False
+    return True
+
+
 def _apply_change_preserving_markup(
     line:       ExtractedLine,
     orig_start: int,
@@ -1472,9 +1604,14 @@ def _apply_change_preserving_markup(
     if not affected_runs:
         return None
 
-    # Skip if all affected runs are from existing <choice> elements
-    if all(r.from_choice for r in affected_runs):
-        return None
+    # --- Handle changes that overlap with pre-existing <choice> elements ---
+    # When any affected run comes from an existing <choice>, merge with it
+    # rather than creating nested choices or wrapping around them.
+    choice_runs = [r for r in affected_runs if r.from_choice]
+    if choice_runs:
+        return _merge_with_existing_choice(
+            line, affected_runs, choice_runs, orig_start, orig_end, expan_text,
+        )
 
     first_run = affected_runs[0]
     last_run = affected_runs[-1]
@@ -1853,6 +1990,11 @@ def process_tei_xml(
     # pipeline marker and the model ids) in teiHeader/encodingDesc/appInfo.
     _ensure_app_info(tree.getroot())
 
+    # Clean up namespace declarations: ensure they appear only on the root
+    # element, and remove any empty xmlns or xml:id attributes.
+    etree.cleanup_namespaces(tree.getroot())
+    _remove_empty_attrs(tree.getroot())
+
     # Serialize
     raw = etree.tostring(
         tree.getroot(),
@@ -1862,6 +2004,22 @@ def process_tei_xml(
 
     # Post-process: format <lb break="no"/> elements
     return _format_lb_break_no(raw)
+
+
+def _remove_empty_attrs(root: etree._Element) -> None:
+    """
+    Remove empty xmlns and xml:id attributes from all elements in the tree.
+    These can appear as artifacts of tree manipulation.
+    """
+    xml_id_key = f"{{{XML_NS}}}id"
+    for el in root.iter():
+        # Remove empty xml:id
+        if el.get(xml_id_key) == "":
+            del el.attrib[xml_id_key]
+        # Remove explicit xmlns="" (lxml represents this differently,
+        # but check for safety)
+        if "xmlns" in el.attrib and el.attrib["xmlns"] == "":
+            del el.attrib["xmlns"]
 
 
 def _format_lb_break_no(xml_string: str) -> str:
