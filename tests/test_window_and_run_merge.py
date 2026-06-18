@@ -92,7 +92,7 @@ class CrossLineChoiceInsertionTests(unittest.TestCase):
             {
                 "ExtractedLine": object,
                 "etree": etree,
-                "_is_inline_element": lambda node: node.tag == "hi",
+                "_is_intoken_element": lambda node: node.tag == "hi",
             },
         )
         cls.truncate_line_end = staticmethod(funcs["_truncate_line_end"])
