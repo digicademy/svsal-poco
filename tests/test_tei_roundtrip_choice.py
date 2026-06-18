@@ -473,5 +473,219 @@ class TestNoSpuriousChoiceFromGlyphVariants(unittest.TestCase):
         )
 
 
+
+
+class TestCrossLineAbbreviationExpansion(unittest.TestCase):
+    """
+    Regression tests for cross-line abbreviation expansion (the pr\u00e6st\u00e3tes bug).
+
+    PR #10 fixed _expand_left/_expand_right to stop at LINE_SEP, which
+    correctly prevents spurious cross-line choices from glyph variants.
+    But it also broke genuine cross-line abbreviations that span a
+    non-breaking line boundary, because the diff was being split into two
+    single-line changes instead of one cross-line change.
+
+    The fix: after glyph-variant filtering, boundary-adjacent single-line
+    changes are merged back into a single cross-line change that
+    _apply_cross_line_choice can handle.
+    """
+
+    def _make_doc(self, body: str) -> str:
+        return (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0">'
+            '<teiHeader><fileDesc><titleStmt><title>T</title></titleStmt>'
+            '<publicationStmt><p/></publicationStmt>'
+            '<sourceDesc><p/></sourceDesc></fileDesc></teiHeader>'
+            '<text><body><p>'
+            '<lb xml:id="W0100-00-0009-lb-0034"/>'
+            + body +
+            '</p></body></text></TEI>'
+        )
+
+    def _body_str(self, result: str) -> str:
+        tree = etree.fromstring(result.encode())
+        body_el = tree.find(f"{{{TEI_NS}}}text/{{{TEI_NS}}}body")
+        return etree.tostring(body_el, encoding="unicode")
+
+    # The input from the bug report
+    INPUT_BODY = (
+        'altas, <g ref="#char0026">&amp;</g> pr<g ref="#char00e6">\u00e6</g>'
+        '<lb xml:id="W0100-00-0009-lb-0035"/>'
+        'st<g ref="#chara0303">\u00e3</g>tes ni<g ref="#char017f">\u017f</g>i magnus'
+    )
+
+    def _pipeline_a(self, rows, pre_annotated):
+        """Model correctly expands both halves: pr\u00e6 → prae, st\u00e3tes → stantes."""
+        expanded = {r["id"]: r["source_sic"] for r in rows}
+        expanded["W0100-00-0009-lb-0034"] = "altas, & prae"
+        expanded["W0100-00-0009-lb-0035"] = "stantes ni\u017fi magnus"
+        return expanded, {"W0100-00-0009-lb-0034": "W0100-00-0009-lb-0035"}
+
+    def _pipeline_b(self, rows, pre_annotated):
+        """Model expands only the \u00e3 part: st\u00e3tes → stantes, pr\u00e6 unchanged."""
+        expanded = {r["id"]: r["source_sic"] for r in rows}
+        expanded["W0100-00-0009-lb-0034"] = "altas, & pr\u00e6"   # \u00e6 NOT expanded
+        expanded["W0100-00-0009-lb-0035"] = "stantes ni\u017fi magnus"
+        return expanded, {"W0100-00-0009-lb-0034": "W0100-00-0009-lb-0035"}
+
+    def _get_choices(self, result: str) -> list:
+        tree = etree.fromstring(result.encode())
+        body = tree.find(f"{{{TEI_NS}}}text/{{{TEI_NS}}}body")
+        return body.findall(f".//{{{TEI_NS}}}choice")
+
+    def test_scenario_a_produces_single_cross_line_choice(self):
+        """
+        When the model expands both halves (pr\u00e6→prae AND st\u00e3tes→stantes),
+        the result should be ONE cross-line <choice> wrapping the full
+        pr\u00e6[lb]st\u00e3tes token, not two separate single-line choices.
+        """
+        xml_input = self._make_doc(self.INPUT_BODY)
+        result = process_tei_xml(xml_input, self._pipeline_a)
+        choices = self._get_choices(result)
+
+        self.assertEqual(
+            len(choices), 1,
+            f"Expected exactly 1 cross-line <choice>, got {len(choices)}. "
+            f"Body: {self._body_str(result)}"
+        )
+        choice = choices[0]
+        abbr = choice.find(f"{{{TEI_NS}}}abbr")
+        expan = choice.find(f"{{{TEI_NS}}}expan")
+        self.assertIsNotNone(abbr)
+        self.assertIsNotNone(expan)
+
+        # <abbr> must contain the <lb/> element (cross-line structure)
+        lb_in_abbr = abbr.find(f"{{{TEI_NS}}}lb")
+        self.assertIsNotNone(lb_in_abbr,
+            "<abbr> must contain the <lb/> element for a cross-line choice")
+
+        # <abbr> text must cover both pr\u00e6 and st\u00e3tes
+        abbr_text = "".join(abbr.itertext())
+        self.assertIn("pr", abbr_text)
+        self.assertIn("\u00e6", abbr_text,   # æ
+            "æ should be inside <abbr>")
+        self.assertIn("st", abbr_text)
+        self.assertIn("\u00e3", abbr_text,   # ã
+            "ã should be inside <abbr>")
+
+        # <expan> must contain "prae" and "stantes" (the model's expanded forms)
+        expan_text = "".join(expan.itertext())
+        self.assertIn("prae", expan_text,
+            f"'prae' missing from <expan>; got: {expan_text!r}")
+        self.assertIn("stantes", expan_text,
+            f"'stantes' missing from <expan>; got: {expan_text!r}")
+
+        # <expan> must also contain a <lb sameAs> element (cross-line structure)
+        lb_in_expan = expan.find(f"{{{TEI_NS}}}lb")
+        self.assertIsNotNone(lb_in_expan,
+            "<expan> must contain a <lb sameAs=…> element")
+        self.assertIn("W0100-00-0009-lb-0035",
+                      lb_in_expan.get("sameAs", ""),
+                      "<lb> in <expan> should have sameAs pointing to the original lb")
+
+    def test_scenario_b_produces_cross_line_choice_not_single_line(self):
+        """
+        When the model expands only the L2 part (st\u00e3tes→stantes) but leaves L1
+        unchanged (pr\u00e6 stays pr\u00e6), the result should still be a cross-line
+        <choice> wrapping both parts — not a single-line L2-only choice that
+        leaves pr\u00e6 outside any markup.
+        """
+        xml_input = self._make_doc(self.INPUT_BODY)
+        result = process_tei_xml(xml_input, self._pipeline_b)
+        choices = self._get_choices(result)
+        body_s = self._body_str(result)
+
+        self.assertEqual(
+            len(choices), 1,
+            f"Expected exactly 1 cross-line <choice>, got {len(choices)}. Body: {body_s}"
+        )
+        choice = choices[0]
+        abbr = choice.find(f"{{{TEI_NS}}}abbr")
+        expan = choice.find(f"{{{TEI_NS}}}expan")
+        self.assertIsNotNone(abbr)
+        self.assertIsNotNone(expan)
+
+        # <abbr> must contain the <lb/> (cross-line, not just L2)
+        lb_in_abbr = abbr.find(f"{{{TEI_NS}}}lb")
+        self.assertIsNotNone(lb_in_abbr,
+            "<abbr> must contain the <lb/> element; currently only L2 is wrapped")
+
+        # <abbr> text must cover L1 part (pr\u00e6)
+        abbr_text = "".join(abbr.itertext())
+        self.assertIn("pr", abbr_text,
+            "'pr' (L1 word start) must be inside <abbr>")
+
+        # <expan> must cover L2 expansion
+        expan_text = "".join(expan.itertext())
+        self.assertIn("stantes", expan_text,
+            f"'stantes' missing from <expan>; got: {expan_text!r}")
+
+    def test_glyph_variant_at_l2_start_does_not_produce_cross_line_choice(self):
+        """
+        Regression: a glyph-variant-only change at the very start of L2
+        (e.g. cleſia→clesia) must NOT produce a cross-line <choice> even
+        though it is adjacent to the LINE_SEP boundary.  The glyph-variant
+        filter must neutralise it before the boundary-merge logic runs.
+        """
+        body = (
+            'ec'
+            '<lb xml:id="lb-A"/>'
+            'cle<g ref="#char017f">\u017f</g>ia. finis'
+        )
+        xml_input = self._make_doc(body)
+
+        def pipeline(rows, pre_annotated):
+            expanded = {r["id"]: r["source_sic"] for r in rows}
+            # L1 unchanged, L2: ſ→s only (glyph variant)
+            expanded["W0100-00-0009-lb-0034"] = "ec"
+            expanded["lb-A"] = "clesia. finis"
+            return expanded, {"W0100-00-0009-lb-0034": "lb-A"}
+
+        result = process_tei_xml(xml_input, pipeline)
+        choices = self._get_choices(result)
+        self.assertEqual(
+            len(choices), 0,
+            "A glyph-variant-only change at L2 start must NOT create a <choice>. "
+            f"Body: {self._body_str(result)}"
+        )
+
+    def test_real_l1_abbr_plus_glyph_l2_start_stays_single_line(self):
+        """
+        Regression: if L1's last word is a real abbreviation (magn\u0169→magnum)
+        that ends at the LINE_SEP, but L2's first word is only a glyph variant
+        (cleſia→clesia), only the L1 abbreviation should get a single-line
+        <choice>.  No cross-line choice should be created.
+        """
+        body = (
+            'magn<g ref="#charu0303">\u0169</g>'
+            '<lb xml:id="lb-B"/>'
+            'cle<g ref="#char017f">\u017f</g>ia finis'
+        )
+        xml_input = self._make_doc(body)
+
+        def pipeline(rows, pre_annotated):
+            expanded = {r["id"]: r["source_sic"] for r in rows}
+            expanded["W0100-00-0009-lb-0034"] = "magnum"  # real abbr
+            expanded["lb-B"] = "clesia finis"              # glyph only
+            return expanded, {"W0100-00-0009-lb-0034": "lb-B"}
+
+        result = process_tei_xml(xml_input, pipeline)
+        choices = self._get_choices(result)
+        body_s = self._body_str(result)
+
+        # Should have exactly one choice, for magn\u0169→magnum only (single-line L1)
+        self.assertEqual(len(choices), 1,
+            f"Expected 1 choice (single-line L1 abbr), got {len(choices)}. Body: {body_s}")
+
+        expan = choices[0].find(f"{{{TEI_NS}}}expan")
+        expan_text = "".join(expan.itertext())
+        self.assertIn("magnum", expan_text)
+        # Cross-line structure must NOT be present
+        self.assertIsNone(
+            choices[0].find(f"{{{TEI_NS}}}abbr/{{{TEI_NS}}}lb"),
+            "Single-line choice must NOT have a <lb> inside <abbr>"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

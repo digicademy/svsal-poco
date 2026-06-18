@@ -757,6 +757,93 @@ def _build_line_chains(
     return chains
 
 
+def _merge_sep_adjacent_changes(
+    changes:       list[tuple[int, int, int, int]],
+    sep_positions: list[int],
+    orig_concat:   str,
+    exp_concat:    str,
+) -> list[tuple[int, int, int, int]]:
+    """
+    Merge or extend changes that border a LINE_SEP so genuine cross-line
+    abbreviations are routed through _apply_cross_line_choice.
+
+    _expand_left/_expand_right (fixed in PR #10) stop at LINE_SEP to prevent
+    spurious cross-line choices from glyph variants.  But a real cross-line
+    abbreviation — e.g. pr⟨æ⟩[lb]st⟨ã⟩tes → praestantes — can produce two
+    single-line changes that each touch the separator:
+
+        L1: orig_end == sep_pos    (word ending at the line boundary)
+        L2: orig_start == sep_pos+1 (word starting right after the boundary)
+
+    This function detects such pairs (and lone L2-boundary changes) *after*
+    glyph-variant filtering has already removed noise, then stitches them
+    into a single cross-line change whose range spans the LINE_SEP so the
+    caller dispatches it via _apply_cross_line_choice.
+    """
+    if not changes or not sep_positions:
+        return changes
+
+    # Locate LINE_SEP characters in exp_concat (one per chain junction,
+    # matching sep_positions[k] in orig_concat one-to-one).
+    exp_sep_positions: list[int] = [i for i, c in enumerate(exp_concat) if c == LINE_SEP]
+
+    result = list(changes)
+    removed: set[int] = set()
+
+    for k, sep_pos in enumerate(sep_positions):
+        if k >= len(exp_sep_positions):
+            continue
+        exp_sep_pos = exp_sep_positions[k]
+
+        # Change whose right edge is exactly at sep_pos (L1 word boundary).
+        l1_idx = next(
+            (i for i, (o1, o2, e1, e2) in enumerate(result)
+             if i not in removed and o2 == sep_pos),
+            None,
+        )
+        # Change whose left edge starts immediately after sep_pos (L2 word boundary).
+        l2_idx = next(
+            (i for i, (o1, o2, e1, e2) in enumerate(result)
+             if i not in removed and o1 == sep_pos + len(LINE_SEP)),
+            None,
+        )
+
+        if l1_idx is not None and l2_idx is not None:
+            # Both halves differ from the model — merge into one cross-line
+            # change whose range includes the LINE_SEP.
+            l1_o1, l1_o2, l1_e1, l1_e2 = result[l1_idx]
+            _l2_o1, l2_o2, _l2_e1, l2_e2 = result[l2_idx]
+            result[l1_idx] = (l1_o1, l2_o2, l1_e1, l2_e2)
+            removed.add(l2_idx)
+
+        elif l2_idx is not None:
+            # Only the L2 part changed.  Extend the change leftward in both
+            # orig_concat and exp_concat to include L1's last word, so
+            # _apply_cross_line_choice can wrap the full cross-line token.
+            _l2_o1, l2_o2, _l2_e1, l2_e2 = result[l2_idx]
+
+            # Walk left from sep_pos in orig to find word start.
+            o_word_start = sep_pos
+            while (o_word_start > 0
+                   and not orig_concat[o_word_start - 1].isspace()
+                   and orig_concat[o_word_start - 1] != LINE_SEP):
+                o_word_start -= 1
+
+            # Walk left from exp_sep_pos in exp to find the matching word start
+            # (L1 expansions may shift absolute positions in exp_concat).
+            e_word_start = exp_sep_pos
+            while (e_word_start > 0
+                   and not exp_concat[e_word_start - 1].isspace()
+                   and exp_concat[e_word_start - 1] != LINE_SEP):
+                e_word_start -= 1
+
+            if o_word_start < sep_pos:
+                result[l2_idx] = (o_word_start, l2_o2, e_word_start, l2_e2)
+        # If only L1 exists, leave it as a single-line change (correct as-is).
+
+    return [c for i, c in enumerate(result) if i not in removed]
+
+
 def _apply_chain_expansion(
     chain:          list[ExtractedLine],
     expanded_texts: dict[str, str],
@@ -794,21 +881,35 @@ def _apply_chain_expansion(
             sep_positions.append(offset)
             offset += len(LINE_SEP)
 
-    # Process changes in reverse order
-    for orig_start, orig_end, exp_start, exp_end in reversed(changes):
+    # Filter out punctuation-only and glyph-variant-only changes, then
+    # merge boundary-adjacent pairs into cross-line changes so that
+    # abbreviations spanning a non-breaking line break are dispatched as
+    # a single _apply_cross_line_choice call rather than two single-line
+    # changes.  This must happen *after* individual glyph-variant filtering
+    # so that e.g. "cleſia"→"clesia" at the start of L2 (glyph-variant for
+    # ſ→s) is removed before any merging step considers it.
+    real_changes: list[tuple[int, int, int, int]] = []
+    for o1, o2, e1, e2 in changes:
+        ot = orig_concat[o1:o2]
+        et = exp_concat[e1:e2]
+        if not ot or not et:
+            continue
+        if _is_punctuation_only_change(ot, et):
+            continue
+        if _is_glyph_variant_only_change(ot, et):
+            continue
+        real_changes.append((o1, o2, e1, e2))
+
+    if sep_positions:
+        real_changes = _merge_sep_adjacent_changes(
+            real_changes, sep_positions, orig_concat, exp_concat,
+        )
+
+    # Process changes in reverse order (right-to-left) so tree offsets
+    # remain valid as earlier modifications are applied.
+    for orig_start, orig_end, exp_start, exp_end in reversed(real_changes):
         orig_text = orig_concat[orig_start:orig_end]
         exp_text = exp_concat[exp_start:exp_end]
-
-        if not orig_text or not exp_text:
-            continue
-
-        # Skip changes that are only whitespace/punctuation differences
-        if _is_punctuation_only_change(orig_text, exp_text):
-            continue
-
-        # Skip changes that are only glyph variants (ſ→s, è→e, etc.)
-        if _is_glyph_variant_only_change(orig_text, exp_text):
-            continue
 
         # Check if change spans a separator → cross-line
         crossed_seps = [s for s in sep_positions if orig_start <= s < orig_end]
@@ -1059,37 +1160,43 @@ def _apply_cross_line_choice(
     word_end_in_l2 = pos
     abbr_part2 = l2_text[l2_content_start:word_end_in_l2]
 
-    # Build the full expanded word.
-    # The diff's exp_text covers the changed portion (may include LINE_SEP).
-    # We need the full word including any unchanged prefix from L1.
-    exp_clean = exp_text.replace(LINE_SEP, "")
-
-    # How much of L1's word portion is NOT covered by the diff?
+    # Build the expanded word parts.
+    # When exp_text contains LINE_SEP, the model placed the break at the
+    # correct position in the expanded form — use it directly.  This avoids
+    # fragile character-count alignment when, for example, æ expands to ae
+    # right at the boundary.
     diff_local_start_in_l1 = orig_start - lb1_start
     l1_prefix = l1_text[word_start_in_l1:min(diff_local_start_in_l1, len(l1_text))]
     l1_prefix = l1_prefix.rstrip()
 
-    full_exp = l1_prefix + exp_clean
-
-    # Strip trailing punctuation from expanded word (same as abbr)
     trailing_punct = ""
-    while full_exp and full_exp[-1] in WORD_BREAK_PUNCT:
-        trailing_punct = full_exp[-1] + trailing_punct
-        full_exp = full_exp[:-1]
 
-    # Split expanded word at proportional position
-    total_abbr_len = len(abbr_part1) + len(abbr_part2)
-    if total_abbr_len > 0:
-        src_break = len(abbr_part1)
-        full_abbr = abbr_part1 + abbr_part2
-        split = _find_tgt_break_with_fallback(full_abbr, full_exp, src_break)
-        if split is None:
-            # fallback to ratio if alignment fails entirely
-            split = round(len(full_exp) * len(abbr_part1) / max(total_abbr_len, 1))
+    if LINE_SEP in exp_text:
+        sep_idx = exp_text.index(LINE_SEP)
+        exp_part1 = l1_prefix + exp_text[:sep_idx]
+        exp_part2_raw = exp_text[sep_idx + len(LINE_SEP):]
+        while exp_part2_raw and exp_part2_raw[-1] in WORD_BREAK_PUNCT:
+            trailing_punct = exp_part2_raw[-1] + trailing_punct
+            exp_part2_raw = exp_part2_raw[:-1]
+        exp_part2 = exp_part2_raw
     else:
-        split = len(full_exp) // 2
-    exp_part1 = full_exp[:split]
-    exp_part2 = full_exp[split:]
+        # Fallback: rebuild from cleaned exp_text and align proportionally.
+        exp_clean = exp_text.replace(LINE_SEP, "")
+        full_exp = l1_prefix + exp_clean
+        while full_exp and full_exp[-1] in WORD_BREAK_PUNCT:
+            trailing_punct = full_exp[-1] + trailing_punct
+            full_exp = full_exp[:-1]
+        total_abbr_len = len(abbr_part1) + len(abbr_part2)
+        if total_abbr_len > 0:
+            src_break = len(abbr_part1)
+            full_abbr = abbr_part1 + abbr_part2
+            split = _find_tgt_break_with_fallback(full_abbr, full_exp, src_break)
+            if split is None:
+                split = round(len(full_exp) * len(abbr_part1) / max(total_abbr_len, 1))
+        else:
+            split = len(full_exp) // 2
+        exp_part1 = full_exp[:split]
+        exp_part2 = full_exp[split:]
 
     # --- Build <choice> element ---
     choice = etree.Element(_tag("choice"))
@@ -1116,11 +1223,18 @@ def _apply_cross_line_choice(
         lb2_clone, abbr_el, line2.text_runs, 0, word_end_in_l2,
     )
 
-    # <expan>: exp_part1 + <lb sameAs="#id"/> + exp_part2
+    # <expan>: exp_part1 + <lb sameAs="#id" break="no" xml:id="…"/> + exp_part2
     expan_el.text = exp_part1
     lb_same = etree.SubElement(expan_el, _tag("lb"))
     if lb2_id:
         lb_same.set("sameAs", f"#{lb2_id}")
+        # Derive a unique xml:id for the sameAs lb by inserting "s" before
+        # the leading digit of the last hyphen-separated segment, matching
+        # the corpus convention (e.g. "…-lb-0035" → "…-lb-s0035").
+        lb_same_id = re.sub(r'(lb-)(\d)', r'\1s\2', lb2_id)
+        if lb_same_id != lb2_id:
+            _set_xml_id(lb_same, lb_same_id)
+    lb_same.set("break", "no")
     lb_same.tail = exp_part2
 
     # --- Tree surgery ---
