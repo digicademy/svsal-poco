@@ -687,5 +687,163 @@ class TestCrossLineAbbreviationExpansion(unittest.TestCase):
         )
 
 
+
+
+class TestPreExistingCrossLineChoicePreserved(unittest.TestCase):
+    """
+    Regression tests for pre-existing cross-line <choice> elements that were
+    annotated by the rule-based system and should be left structurally intact.
+
+    Root cause of the bug:
+    When a <lb break="no"/> sits inside a pre-existing <choice>/<abbr> (e.g.
+    <abbr>repe<lb/>riat̃</abbr>), the extraction code had two defects:
+
+    1. _walk_into for <choice> called _inner_text(abbr) without respecting
+       next_lb, so L1 collected the FULL abbr text ("reperiat̃") plus the
+       choice's tail (" in "), when it should only have collected "repe".
+
+    2. _collect_text_after_lb, starting from the lb inside <abbr>, climbed
+       up to <abbr> and then walked into the sibling <expan>, collecting
+       "reperiatur" as if it were L2 text — pure garbage.
+
+    The garbled plain_text caused the diff to find a spurious large change
+    spanning both halves plus surrounding text, which was then wrapped in a
+    new nested <choice> inside the existing <abbr>.
+
+    Fix: detect lb elements inside <choice>/<abbr> and handle them specially
+    in both _walk_into (L1: collect only pre-lb text) and
+    _collect_text_after_lb (L2: collect post-lb abbr content as from_choice,
+    skip <expan>, then resume after <choice>).
+
+    A secondary fix: strip LINE_SEP from exp_text before comparing it to
+    existing_text in the cross-line pre-existing-choice merge, since the
+    merged change carries "repe¬riatur" while existing_text is "reperiatur".
+    """
+
+    # Exact input from the bug report
+    INPUT_BODY = (
+        'Eccle<g ref="#char017f">\u017f</g>ia quot nominibus compellata '
+        '<choice resp="#auto" xml:id="W0100-00-0019-ce-04eb">'
+        '<abbr>repe<lb xml:id="W0100-00-0019-lb-2029" rendition="#hyphen" break="no"/>'
+        'ria<g ref="#chart0303">t\u0303</g></abbr>'
+        '<expan resp="#CR #auto">repe'
+        '<lb sameAs="#W0100-00-0019-lb-2029" rendition="#hyphen" break="no"'
+        ' xml:id="W0100-00-0019-lb-s704"/>riatur</expan>'
+        '</choice> in <g ref="#char017f">\u017f</g>criptura '
+        '<g ref="#char017f">\u017f</g>acra. pa. 53. col. 2. in prin.'
+    )
+
+    def _make_doc(self, body: str) -> str:
+        return (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0">'
+            '<teiHeader><fileDesc><titleStmt><title>T</title></titleStmt>'
+            '<publicationStmt><p/></publicationStmt>'
+            '<sourceDesc><p/></sourceDesc></fileDesc></teiHeader>'
+            '<text><body><p>'
+            '<item xml:id="W0100-00-0019-it-05f1">'
+            '<lb xml:id="W0100-00-0019-lb-2028"/>'
+            + body +
+            '</item></p></body></text></TEI>'
+        )
+
+    def _body_el(self, result: str) -> etree._Element:
+        tree = etree.fromstring(result.encode())
+        return tree.find(f"{{{TEI_NS}}}text/{{{TEI_NS}}}body")
+
+    def _pipeline_agree(self, rows, pre_annotated):
+        """Model agrees with the rule-based expansion (riat̃ → riatur)."""
+        expanded = {}
+        boundaries = {}
+        for row in rows:
+            lid = row["id"]
+            txt = row["source_sic"]
+            # Expand riat̃ → riatur, resolve glyph variants
+            txt = txt.replace("riat\u0303", "riatur")
+            txt = txt.replace("\u017f", "s")
+            expanded[lid] = txt
+        # lb-2029 is pre-annotated (break="no" in source); pipeline returns it too
+        boundaries["W0100-00-0019-lb-2028"] = "W0100-00-0019-lb-2029"
+        return expanded, boundaries
+
+    def test_no_nested_choice_inside_abbr(self):
+        """
+        A pre-existing cross-line <choice> must never get a new nested
+        <choice> inserted inside its <abbr>.
+        """
+        result = process_tei_xml(self._make_doc(self.INPUT_BODY), self._pipeline_agree)
+        body = self._body_el(result)
+
+        outer_choice = body.find(f".//{{{TEI_NS}}}choice[@{{http://www.w3.org/XML/1998/namespace}}id='W0100-00-0019-ce-04eb']")
+        self.assertIsNotNone(outer_choice, "Original <choice> must still exist")
+
+        abbr = outer_choice.find(f"{{{TEI_NS}}}abbr")
+        self.assertIsNotNone(abbr)
+
+        nested_choices = abbr.findall(f".//{{{TEI_NS}}}choice")
+        self.assertEqual(
+            len(nested_choices), 0,
+            f"No nested <choice> must appear inside the existing <abbr>, "
+            f"got: {etree.tostring(abbr, encoding='unicode')}"
+        )
+
+    def test_abbr_content_unchanged(self):
+        """
+        The <abbr> content (repe + lb + riat̃) must be preserved exactly
+        — the rule-based annotation is trusted and must not be touched.
+        """
+        result = process_tei_xml(self._make_doc(self.INPUT_BODY), self._pipeline_agree)
+        body = self._body_el(result)
+
+        outer_choice = body.find(f".//{{{TEI_NS}}}choice[@{{http://www.w3.org/XML/1998/namespace}}id='W0100-00-0019-ce-04eb']")
+        abbr = outer_choice.find(f"{{{TEI_NS}}}abbr")
+        abbr_text = "".join(abbr.itertext())
+        self.assertIn("repe", abbr_text, "<abbr> must still contain 'repe'")
+        self.assertIn("ria", abbr_text, "<abbr> must still contain 'ria'")
+        self.assertIn("t\u0303", abbr_text, "<abbr> must still contain the abbreviated 't̃'")
+
+        lb_in_abbr = abbr.find(f"{{{TEI_NS}}}lb")
+        self.assertIsNotNone(lb_in_abbr, "The <lb> must remain inside <abbr>")
+
+    def test_model_resp_added_to_existing_expan(self):
+        """
+        When the model agrees with the pre-existing expansion (riatur),
+        the model identifier must be appended to the existing <expan @resp>.
+        No new <choice> or <expan> should be created.
+        """
+        result = process_tei_xml(self._make_doc(self.INPUT_BODY), self._pipeline_agree)
+        body = self._body_el(result)
+
+        outer_choice = body.find(f".//{{{TEI_NS}}}choice[@{{http://www.w3.org/XML/1998/namespace}}id='W0100-00-0019-ce-04eb']")
+        expans = outer_choice.findall(f"{{{TEI_NS}}}expan")
+        self.assertEqual(len(expans), 1, "Exactly one <expan> must remain")
+
+        expan = expans[0]
+        resp = expan.get("resp", "")
+        self.assertIn("#CR", resp, "Original #CR resp must be preserved")
+        self.assertIn("#auto", resp, "Original #auto resp must be preserved")
+        self.assertIn(f"#{EXPANSION_MODEL}", resp,
+                      f"Model identifier #{EXPANSION_MODEL} must be added to <expan @resp>")
+
+        expan_text = "".join(expan.itertext())
+        self.assertIn("riatur", expan_text, "<expan> must still contain 'riatur'")
+
+    def test_main_text_after_choice_preserved(self):
+        """
+        Text after the </choice> (' in ſcriptura ſacra…') must not be
+        swallowed into the choice or garbled.
+        """
+        result = process_tei_xml(self._make_doc(self.INPUT_BODY), self._pipeline_agree)
+        body = self._body_el(result)
+        full_text = "".join(body.itertext())
+
+        # The XML preserves <g>ſ</g> elements, so itertext() gives the raw ſ,
+        # not the model-resolved 's'. Check for stable substrings instead.
+        self.assertIn("pa. 53. col. 2. in prin.", full_text,
+                      "Trailing text must be preserved after </choice>")
+        # ' in ' should appear between the choice and scriptura
+        self.assertIn(" in ", full_text,
+                      "The ' in ' text after </choice> must be preserved")
+
+
 if __name__ == "__main__":
     unittest.main()
