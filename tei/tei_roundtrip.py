@@ -471,6 +471,63 @@ def _is_descendant_of(el: etree._Element, ancestor: etree._Element) -> bool:
     return False
 
 
+def _find_enclosing_choice_abbr(
+    lb: etree._Element,
+) -> Optional[etree._Element]:
+    """
+    Return the enclosing <choice> element if lb is a descendant of a
+    <choice>/<abbr> or <choice>/<sic> branch, else None.
+
+    Used to detect lb elements that live inside a pre-existing cross-line
+    choice so that text collection skips the <expan>/<corr> sibling.
+    """
+    parent = lb.getparent()
+    while parent is not None:
+        local = parent.tag.split("}")[-1] if "}" in parent.tag else parent.tag
+        if local in ("abbr", "sic"):
+            grandparent = parent.getparent()
+            if grandparent is not None:
+                gp_local = grandparent.tag.split("}")[-1] if "}" in grandparent.tag else grandparent.tag
+                if gp_local == "choice":
+                    return grandparent
+        # Stop climbing at block-level boundaries
+        if local in ("p", "ab", "div", "body", "text", "TEI", "item", "list"):
+            break
+        parent = parent.getparent()
+    return None
+
+
+def _collect_until_lb(
+    el:    etree._Element,
+    lb:    etree._Element,
+    parts: list[str],
+) -> bool:
+    """
+    Depth-first collect text from el's subtree until lb is encountered.
+    Returns True if lb was found (caller should stop collecting).
+    """
+    if el.text:
+        parts.append(el.text)
+    for child in el:
+        if child is lb:
+            return True
+        if _collect_until_lb(child, lb, parts):
+            return True
+        if child.tail:
+            parts.append(child.tail)
+    return False
+
+
+def _text_before_lb_in_el(el: etree._Element, lb: etree._Element) -> str:
+    """
+    Return text content of el (and its descendants) that appears before lb
+    in document order.  lb must be a descendant of el.
+    """
+    parts: list[str] = []
+    _collect_until_lb(el, lb, parts)
+    return "".join(parts)
+
+
 def _get_languages(lb: etree._Element, text_runs: list[TextRun]) -> list[str]:
     """Collect distinct xml:lang values from lb ancestry and text runs."""
     langs: list[str] = []
@@ -530,7 +587,45 @@ def _collect_text_after_lb(
         (uses <abbr>/<sic> text instead — we want the original form)
     For note lines:
       - Scopes to the note's own content
+
+    Special case: if lb sits inside a pre-existing <choice>/<abbr> (a cross-line
+    abbreviation that was already annotated by the rule-based system), only the
+    text after lb within the same <abbr>/<sic> is collected (marked from_choice),
+    then the walk resumes after the enclosing <choice> element.  This prevents
+    accidentally collecting the <expan>/<corr> branch as plain text.
     """
+    # --- Special case: lb is inside an existing <choice>/<abbr> ---
+    choice_el = _find_enclosing_choice_abbr(lb)
+    if choice_el is not None:
+        # Collect lb.tail and its siblings within <abbr>/<sic>, marking them
+        # from_choice so that _apply_cross_line_choice can detect the overlap
+        # and merge model resp with the existing <expan> instead of building
+        # a new nested <choice>.
+        if lb.tail:
+            text_runs.append(TextRun(
+                text=lb.tail, node=choice_el, is_tail=False, from_choice=True,
+            ))
+        for sib in lb.itersiblings():
+            if next_lb is not None and sib is next_lb:
+                return
+            sib_text = _inner_text(sib)
+            if sib_text:
+                text_runs.append(TextRun(
+                    text=sib_text, node=choice_el, is_tail=False, from_choice=True,
+                ))
+            if sib.tail:
+                text_runs.append(TextRun(
+                    text=sib.tail, node=choice_el, is_tail=False, from_choice=True,
+                ))
+        # Jump past the <choice> element: collect its tail, then continue
+        if choice_el.tail:
+            text_runs.append(TextRun(
+                text=choice_el.tail, node=choice_el, is_tail=True,
+            ))
+        _walk_after(choice_el, next_lb, is_in_note, text_runs, notes, 0)
+        return
+
+    # --- Normal case ---
     # Start from lb's tail text
     if lb.tail:
         text = lb.tail
@@ -623,6 +718,18 @@ def _walk_into(
         sic = el.find(_tag("sic"))
         source_el = abbr if abbr is not None else sic
         if source_el is not None:
+            if next_lb is not None and _is_descendant_of(next_lb, source_el):
+                # The next line boundary is inside this choice's abbr/sic.
+                # Collect only the text that precedes next_lb — the content
+                # after next_lb belongs to the next line.  choice.tail is
+                # also omitted: it comes after next_lb in document order.
+                pre_lb = _text_before_lb_in_el(source_el, next_lb)
+                if pre_lb:
+                    text_runs.append(TextRun(
+                        text=pre_lb, node=el, is_tail=False,
+                        from_choice=True,
+                    ))
+                return
             # Collect text from the source branch
             source_text = _inner_text(source_el)
             if source_text:
@@ -1127,8 +1234,11 @@ def _apply_cross_line_choice(
                 existing_expan = choice_el.find(_tag("expan"))
                 if existing_expan is not None:
                     existing_text = _inner_text(existing_expan)
-                    # Only add model resp when model agrees with existing expansion
-                    if exp_text == existing_text or _texts_equivalent(exp_text, existing_text):
+                    # Strip LINE_SEP before comparing: for a cross-line
+                    # merged change, exp_text carries "repe¬riatur" whereas
+                    # existing_text is the flattened "reperiatur".
+                    exp_text_clean = exp_text.replace(LINE_SEP, "")
+                    if exp_text_clean == existing_text or _texts_equivalent(exp_text_clean, existing_text):
                         _add_resp_to_element(existing_expan, f"#{EXPANSION_MODEL}")
                     else:
                         # Disagreement: flag for manual inspection
