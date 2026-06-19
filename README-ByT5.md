@@ -202,7 +202,7 @@ model.eval()
 text = "Lex est communis ciuitatis cōsensus qui"
 
 enc = tokenizer(text, return_tensors="pt", max_length=512, truncation=True)
-out = model.generate(**enc, max_length=384)
+out = model.generate(**enc, max_length=512)
 result = tokenizer.decode(out[0], skip_special_tokens=True)
 print(result)
 # → "Lex est communis ciuitatis consensus qui"
@@ -220,7 +220,7 @@ The model was trained on multi-line windows using two separator characters:
 text = "ex epicheia poſſet occultè, absq́; paro¬cho, & teſtibus celebrari."
 
 enc = tokenizer(text, return_tensors="pt", max_length=512, truncation=True)
-out = model.generate(**enc, max_length=384)
+out = model.generate(**enc, max_length=512)
 result = tokenizer.decode(out[0], skip_special_tokens=True)
 print(result)
 # → "ex epicheia poſſet occultè, absque paro¬cho, & teſtibus celebrari."
