@@ -191,5 +191,37 @@ class CrossLineChoiceInsertionTests(unittest.TestCase):
         self.assertEqual(list(parent), [lb, choice])
 
 
+class WindowByteLenTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        funcs = _load_functions(
+            root / "infer" / "__init__.py",
+            ["_window_byte_len"],
+            {"LINE_SEP": "\u00ac", "LINE_BREAK": "\u21b5"},
+        )
+        cls.byte_len = staticmethod(funcs["_window_byte_len"])
+
+    def test_counts_real_separator_bytes(self):
+        lines = [
+            {"id": "l0", "source_sic": "ab", "predicted_nonbreaking_next_line": "l1"},
+            {"id": "l1", "source_sic": "cd", "predicted_nonbreaking_next_line": ""},
+            {"id": "l2", "source_sic": "ef", "predicted_nonbreaking_next_line": ""},
+        ]
+        # ab(2) + ¬(2, nonbreaking l0->l1) + cd(2) + ↵(3, breaking l1->l2) + ef(2)
+        self.assertEqual(self.byte_len(lines, [0, 1, 2]), 2 + 2 + 2 + 3 + 2)
+
+    def test_single_line_has_no_separator(self):
+        lines = [{"id": "l0", "source_sic": "abc",
+                  "predicted_nonbreaking_next_line": ""}]
+        self.assertEqual(self.byte_len(lines, [0]), 3)
+
+    def test_multibyte_source_counted_in_bytes(self):
+        # 'ſ' (U+017F) is two UTF-8 bytes.
+        lines = [{"id": "l0", "source_sic": "\u017f",
+                  "predicted_nonbreaking_next_line": ""}]
+        self.assertEqual(self.byte_len(lines, [0]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -157,11 +157,27 @@ def build_sliding_windows(
 
 
 def _window_byte_len(lines: list[dict], indices: list[int]) -> int:
-    """Estimate byte length of a window when lines are joined with LINE_SEP."""
+    """Byte length of a window as ByT5 sees it (lines joined by the separators).
+
+    ByT5 is byte-level, so the budget must count the *UTF-8 bytes* of each
+    separator: LINE_SEP (¬, U+00AC) is 2 bytes and LINE_BREAK (↵, U+21B5) is 3,
+    not 1.  Counting one byte per separator (the previous behaviour) let a
+    window run a few bytes over max_bytes.  The separator between two lines is
+    LINE_SEP when the first predicts the second as its nonbreaking continuation,
+    matching how the source string is built for the model.
+    """
     if not indices:
         return 0
     total = sum(len(lines[i]["source_sic"].encode("utf-8")) for i in indices)
-    total += len(indices) - 1  # LINE_SEP characters
+    for j in range(len(indices) - 1):
+        cur = lines[indices[j]]
+        next_id = lines[indices[j + 1]]["id"]
+        sep = (
+            LINE_SEP
+            if cur.get("predicted_nonbreaking_next_line", "") == next_id
+            else LINE_BREAK
+        )
+        total += len(sep.encode("utf-8"))
     return total
 
 
@@ -174,7 +190,13 @@ def expand_abbreviations(
     model:             T5ForConditionalGeneration,
     tokenizer:         AutoTokenizer,
     max_input_length:  int = 512,
-    max_target_length: int = 384,
+    # Matches the training target length (byt5/train_byt5.py). The previous
+    # inference value (384) was *below* what the model was trained to emit, so
+    # the expansion of a near-full window was truncated before its tail lines
+    # were generated — the dominant source of "missing part" recoveries. ByT5
+    # uses relative position embeddings, so 512 is an in-distribution training
+    # choice, not an architectural limit.
+    max_target_length: int = 512,
     batch_size:        int = 32,
     device:            torch.device = None,
 ) -> list[str]:
