@@ -845,5 +845,311 @@ class TestPreExistingCrossLineChoicePreserved(unittest.TestCase):
                       "The ' in ' text after </choice> must be preserved")
 
 
+class TestCrossLineAbbrWithWhitespaceAroundLb(unittest.TestCase):
+    """
+    Regression tests for the ſuccedãt bug.
+
+    In real TEI, an <lb/> is almost always flanked by layout whitespace
+    (a CR/CRLF newline plus indentation) in the source, so the extracted
+    plain_text of the line *before* the break ends with that whitespace —
+    e.g. "…ſtatui ſucce\\n".  The boundary classifier (correctly) predicts the
+    break as nonbreaking and the model strips the whitespace in its own
+    output, but the roundtrip code matched change edges against the raw
+    LINE_SEP position.  A single trailing newline therefore made the
+    leftward extension in _merge_sep_adjacent_changes a no-op, and the
+    cross-line abbreviation collapsed into an L2-only single-line <choice>
+    (with the trailing period wrongly swallowed inside it).
+
+    PR #11's Scenario B test placed L1's last word directly against the
+    <lb/> with no intervening whitespace, so it never exercised this path —
+    which is why it did not catch the bug.
+
+    Target for "…ſtatui ſucce\\n" / "<lb/>" / "dãt. Item…":
+
+        …ſtatui <choice><abbr><g>ſ</g>ucce<lb break="no" …/>d<g>ã</g>t</abbr>
+                        <expan>ſucce<lb sameAs=… break="no" …/>dant</expan>
+                </choice>. Item…
+
+    i.e. ONE cross-line <choice> wrapping the whole ſucce[lb]dãt token, with
+    the period left outside the <choice>.
+    """
+
+    def _make_doc(self, body: str) -> str:
+        return (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0">'
+            '<teiHeader><fileDesc><titleStmt><title>T</title></titleStmt>'
+            '<publicationStmt><p/></publicationStmt>'
+            '<sourceDesc><p/></sourceDesc></fileDesc></teiHeader>'
+            '<text><body><p>' + body + '</p></body></text></TEI>'
+        )
+
+    def _body_el(self, result: str):
+        tree = etree.fromstring(result.encode())
+        return tree.find(f"{{{TEI_NS}}}text/{{{TEI_NS}}}body")
+
+    def _choices(self, result: str) -> list:
+        return self._body_el(result).findall(f".//{{{TEI_NS}}}choice")
+
+    def _assert_cross_line_succedat(self, result: str):
+        """Shared assertions for the ſucce[lb]dãt → succedant target shape."""
+        choices = self._choices(result)
+        self.assertEqual(
+            len(choices), 1,
+            f"Expected exactly 1 cross-line <choice>, got {len(choices)}. "
+            f"Body: {etree.tostring(self._body_el(result), encoding='unicode')}"
+        )
+        choice = choices[0]
+        abbr = choice.find(f"{{{TEI_NS}}}abbr")
+        expan = choice.find(f"{{{TEI_NS}}}expan")
+        self.assertIsNotNone(abbr)
+        self.assertIsNotNone(expan)
+
+        # <abbr> must contain the <lb/> (cross-line, not L2-only)
+        lb_in_abbr = abbr.find(f"{{{TEI_NS}}}lb")
+        self.assertIsNotNone(
+            lb_in_abbr,
+            "<abbr> must contain the <lb/> element; the whole ſucce[lb]dãt "
+            "token must be wrapped, not just the L2 half."
+        )
+
+        # <abbr> text must cover BOTH halves of the token with no stray
+        # layout whitespace from around the <lb/>.
+        abbr_text = "".join(abbr.itertext())
+        self.assertEqual(
+            abbr_text, "\u017fucced\u00e3t",
+            f"<abbr> must read exactly 'ſuccedãt' (the full token, no stray "
+            f"whitespace); got {abbr_text!r}"
+        )
+
+        # <expan> must read 'ſuccedant' and contain the <lb sameAs=…>.
+        expan_text = "".join(expan.itertext())
+        self.assertEqual(
+            expan_text, "\u017fuccedant",
+            f"<expan> must read 'ſuccedant'; got {expan_text!r}"
+        )
+        lb_in_expan = expan.find(f"{{{TEI_NS}}}lb")
+        self.assertIsNotNone(lb_in_expan, "<expan> must contain a <lb sameAs=…>")
+        self.assertEqual(lb_in_expan.get("break"), "no")
+
+        # The surviving long-s must be wrapped as <g ref="#char017f"> inside
+        # <expan>, mirroring the diplomatic markup in <abbr> — not emitted as a
+        # bare U+017F character.
+        expan_g = expan.findall(f"{{{TEI_NS}}}g")
+        self.assertEqual(
+            len(expan_g), 1,
+            f"<expan> must contain exactly one <g> (the surviving long-s); "
+            f"got {len(expan_g)}: {etree.tostring(expan, encoding='unicode')}"
+        )
+        self.assertEqual(expan_g[0].get("ref"), "#char017f")
+        self.assertEqual(expan_g[0].text, "\u017f")
+        # That <g> must precede the <lb/> (it is part of the L1 half).
+        self.assertLess(
+            list(expan).index(expan_g[0]), list(expan).index(lb_in_expan),
+            "The <g>ſ</g> must come before the <lb/> in <expan>.")
+        # The expanded 'dant' (L2 half) carries no glyphs.
+        self.assertEqual(lb_in_expan.tail, "dant")
+
+        # The period must be OUTSIDE the <choice> (in its tail), not inside.
+        self.assertTrue(
+            (choice.tail or "").lstrip().startswith("."),
+            f"The period after 'dãt' must follow </choice>, not sit inside it; "
+            f"choice.tail={choice.tail!r}"
+        )
+        self.assertNotIn(
+            ".", abbr_text, "Trailing period must not be inside <abbr>")
+        self.assertNotIn(
+            ".", expan_text, "Trailing period must not be inside <expan>")
+
+    def _pipeline(self, l1_id, l2_id, l1_exp, l2_exp):
+        def pipeline(rows, pre_annotated):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp[l1_id] = l1_exp
+            exp[l2_id] = l2_exp
+            return exp, {l1_id: l2_id}
+        return pipeline
+
+    def test_newline_before_lb_two_line_chain(self):
+        """
+        The minimal reproduction: a trailing newline on L1 (between 'ſucce'
+        and the <lb/>) must NOT prevent the cross-line <choice>.
+        """
+        body = (
+            '<lb xml:id="W0100-00-0014-lb-2009"/>'
+            'Cardinales Apo<g ref="#char017f">\u017f</g>tolorum '
+            '<g ref="#char017f">\u017f</g>tatui <g ref="#char017f">\u017f</g>ucce\n'
+            '<lb xml:id="W0100-00-0014-lb-2010"/>'
+            'd<g ref="#chara0303">\u00e3</g>t. Item <g ref="#char0026">&amp;</g> quid'
+        )
+        result = process_tei_xml(
+            self._make_doc(body),
+            self._pipeline(
+                "W0100-00-0014-lb-2009", "W0100-00-0014-lb-2010",
+                "Cardinales Apo\u017ftolorum \u017ftatui \u017fucce\n",
+                "dant. Item & quid",
+            ),
+        )
+        self._assert_cross_line_succedat(result)
+
+        # The <lb> inside <expan> must derive its xml:id from the original
+        # (…-lb-2010 → …-lb-s2010) per the corpus convention.
+        expan = self._choices(result)[0].find(f"{{{TEI_NS}}}expan")
+        lb_in_expan = expan.find(f"{{{TEI_NS}}}lb")
+        self.assertEqual(
+            lb_in_expan.get("sameAs"), "#W0100-00-0014-lb-2010")
+        self.assertEqual(
+            lb_in_expan.get(f"{{{XML_NS}}}id"), "W0100-00-0014-lb-s2010")
+
+    def test_real_four_line_chain_from_jsonl(self):
+        """
+        The bug as it actually occurs: a four-line nonbreaking chain (the
+        inferred JSONL had lb-2008 → 2009 → 2010 → 2011, each continuing line
+        ending with '\\n').  The ſucce[lb]dãt token sits at the 2009→2010
+        junction; an unrelated single-line abbr (Apoſtolorũ→Apoſtolorum) sits
+        on 2008.  Only the cross-line token should become a cross-line choice.
+        """
+        body = (
+            '<lb xml:id="W0100-00-0014-lb-2008"/>'
+            'Apo<g ref="#char017f">\u017f</g>tolor<g ref="#charu0303">\u0169</g> '
+            'triplex con<g ref="#char017f">\u017f</g>ideratio. Et quomo\n'
+            '<lb xml:id="W0100-00-0014-lb-2009"/>'
+            'do Cardinales Apo<g ref="#char017f">\u017f</g>tolorum '
+            '<g ref="#char017f">\u017f</g>tatui <g ref="#char017f">\u017f</g>ucce\n'
+            '<lb xml:id="W0100-00-0014-lb-2010"/>'
+            'd<g ref="#chara0303">\u00e3</g>t. Item <g ref="#char0026">&amp;</g> '
+            'quid in illis eorum dignitas re\n'
+            '<lb xml:id="W0100-00-0014-lb-2011"/>'
+            'quirat. <g ref="#char0026">&amp;</g>c. pag. 139. col. 2. nu. 3.'
+        )
+
+        def pipeline(rows, pre_annotated):
+            exp = {
+                "W0100-00-0014-lb-2008":
+                    "Apo\u017ftolorum triplex con\u017fideratio. Et quomo\n",
+                "W0100-00-0014-lb-2009":
+                    "do Cardinales Apo\u017ftolorum \u017ftatui \u017fucce\n",
+                "W0100-00-0014-lb-2010":
+                    "dant. Item & quid in illis eorum dignitas re\n",
+                "W0100-00-0014-lb-2011":
+                    "quirat. &c. pag. 139. col. 2. nu. 3.",
+            }
+            boundaries = {
+                "W0100-00-0014-lb-2008": "W0100-00-0014-lb-2009",
+                "W0100-00-0014-lb-2009": "W0100-00-0014-lb-2010",
+                "W0100-00-0014-lb-2010": "W0100-00-0014-lb-2011",
+            }
+            return exp, boundaries
+
+        result = process_tei_xml(self._make_doc(body), pipeline)
+
+        choices = self._choices(result)
+        cross = [c for c in choices
+                 if c.find(f"{{{TEI_NS}}}abbr/{{{TEI_NS}}}lb") is not None]
+        single = [c for c in choices
+                  if c.find(f"{{{TEI_NS}}}abbr/{{{TEI_NS}}}lb") is None]
+
+        # Exactly one cross-line choice (ſuccedãt) and one single-line choice
+        # (Apoſtolorũ).  The 're\nquirat' continuation is NOT an abbreviation
+        # (model left both halves unchanged), so it must not become a choice.
+        self.assertEqual(len(cross), 1,
+                         f"Expected 1 cross-line choice, got {len(cross)}")
+        self.assertEqual(len(single), 1,
+                         f"Expected 1 single-line choice, got {len(single)}")
+
+        cross_abbr = "".join(cross[0].find(f"{{{TEI_NS}}}abbr").itertext())
+        self.assertEqual(cross_abbr, "\u017fucced\u00e3t")
+        single_abbr = "".join(single[0].find(f"{{{TEI_NS}}}abbr").itertext())
+        self.assertEqual(single_abbr, "Apo\u017ftolor\u0169")
+
+    def test_leading_whitespace_on_l2_after_lb(self):
+        """
+        Symmetric case: whitespace *after* the <lb/> (leading layout
+        whitespace on L2) must also be handled, and must not leak into the
+        <abbr> token.
+        """
+        body = (
+            '<lb xml:id="lb-A"/>'
+            'foo bar <g ref="#char017f">\u017f</g>ucce\n'
+            '<lb xml:id="lb-B"/>\n    '
+            'd<g ref="#chara0303">\u00e3</g>t. baz'
+        )
+        result = process_tei_xml(
+            self._make_doc(body),
+            self._pipeline("lb-A", "lb-B",
+                           "foo bar \u017fucce\n", "\n    dant. baz"),
+        )
+        self._assert_cross_line_succedat(result)
+
+    def test_glyph_only_l2_start_with_whitespace_no_choice(self):
+        """
+        A glyph-variant-only change (ſ→s) at the start of L2, with whitespace
+        around the <lb/>, must NOT be promoted to a cross-line choice — the
+        glyph filter must still neutralise it.
+        """
+        body = (
+            '<lb xml:id="lb-A"/>ec\n'
+            '<lb xml:id="lb-B"/>cle<g ref="#char017f">\u017f</g>ia. finis'
+        )
+        result = process_tei_xml(
+            self._make_doc(body),
+            self._pipeline("lb-A", "lb-B", "ec\n", "clesia. finis"),
+        )
+        self.assertEqual(
+            len(self._choices(result)), 0,
+            "A glyph-variant-only L2-start change must not create a <choice>.")
+
+    def test_real_l1_abbr_plus_glyph_l2_with_whitespace_stays_single_line(self):
+        """
+        With whitespace around the <lb/>: if L1's last word is a real abbr
+        (magnũ→magnum) but L2's first word is only a glyph variant
+        (cleſia→clesia), only the single-line L1 choice should appear — no
+        cross-line choice.
+        """
+        body = (
+            '<lb xml:id="lb-A"/>magn<g ref="#charu0303">\u0169</g>\n'
+            '<lb xml:id="lb-B"/>cle<g ref="#char017f">\u017f</g>ia finis'
+        )
+        result = process_tei_xml(
+            self._make_doc(body),
+            self._pipeline("lb-A", "lb-B", "magnum\n", "clesia finis"),
+        )
+        choices = self._choices(result)
+        self.assertEqual(len(choices), 1,
+                         f"Expected 1 single-line choice, got {len(choices)}")
+        self.assertIsNone(
+            choices[0].find(f"{{{TEI_NS}}}abbr/{{{TEI_NS}}}lb"),
+            "Single-line L1 choice must not have a <lb> inside <abbr>.")
+
+
+    def test_single_line_expan_also_wraps_glyphs(self):
+        """
+        Consistency: the single-line expansion path must also wrap surviving
+        special characters in <g> inside <expan>.  Here 'ſã' (long-s glyph +
+        combining-tilde glyph) expands to 'ſan': the long-s survives and must
+        be emitted as <g ref="#char017f">ſ</g> in <expan>, not as a bare
+        U+017F character.
+        """
+        body = (
+            '<lb xml:id="lb-A"/>'
+            'incipit <g ref="#char017f">\u017f</g>'
+            '<g ref="#chara0303">\u00e3</g> finit'
+        )
+        # ſã -> ſan : long-s survives (glyph), ã -> an (real replace)
+        def pipeline(rows, pre_annotated):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-A"] = "incipit \u017fan finit"
+            return exp, {}
+        result = process_tei_xml(self._make_doc(body), pipeline)
+        choices = self._choices(result)
+        self.assertEqual(len(choices), 1)
+        expan = choices[0].find(f"{{{TEI_NS}}}expan")
+        # itertext still reads the full expansion
+        self.assertEqual("".join(expan.itertext()), "\u017fan")
+        # and the long-s is a <g ref="#char017f">, not a bare character
+        g = expan.findall(f"{{{TEI_NS}}}g")
+        self.assertEqual(len(g), 1, "single-line <expan> must wrap the long-s in <g>")
+        self.assertEqual(g[0].get("ref"), "#char017f")
+        self.assertEqual(g[0].text, "\u017f")
+
+
 if __name__ == "__main__":
     unittest.main()
