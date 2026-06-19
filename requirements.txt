@@ -1,4 +1,4 @@
-git+https://github.com/digicademy/svsal-poco@09c7721
+git+https://github.com/digicademy/svsal-poco@82d709d
 flair
 spaces
 sentencepiece
