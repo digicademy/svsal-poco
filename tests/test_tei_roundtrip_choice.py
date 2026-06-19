@@ -931,6 +931,24 @@ class TestCrossLineAbbrWithWhitespaceAroundLb(unittest.TestCase):
         self.assertIsNotNone(lb_in_expan, "<expan> must contain a <lb sameAs=…>")
         self.assertEqual(lb_in_expan.get("break"), "no")
 
+        # The surviving long-s must be wrapped as <g ref="#char017f"> inside
+        # <expan>, mirroring the diplomatic markup in <abbr> — not emitted as a
+        # bare U+017F character.
+        expan_g = expan.findall(f"{{{TEI_NS}}}g")
+        self.assertEqual(
+            len(expan_g), 1,
+            f"<expan> must contain exactly one <g> (the surviving long-s); "
+            f"got {len(expan_g)}: {etree.tostring(expan, encoding='unicode')}"
+        )
+        self.assertEqual(expan_g[0].get("ref"), "#char017f")
+        self.assertEqual(expan_g[0].text, "\u017f")
+        # That <g> must precede the <lb/> (it is part of the L1 half).
+        self.assertLess(
+            list(expan).index(expan_g[0]), list(expan).index(lb_in_expan),
+            "The <g>ſ</g> must come before the <lb/> in <expan>.")
+        # The expanded 'dant' (L2 half) carries no glyphs.
+        self.assertEqual(lb_in_expan.tail, "dant")
+
         # The period must be OUTSIDE the <choice> (in its tail), not inside.
         self.assertTrue(
             (choice.tail or "").lstrip().startswith("."),
@@ -1100,6 +1118,37 @@ class TestCrossLineAbbrWithWhitespaceAroundLb(unittest.TestCase):
         self.assertIsNone(
             choices[0].find(f"{{{TEI_NS}}}abbr/{{{TEI_NS}}}lb"),
             "Single-line L1 choice must not have a <lb> inside <abbr>.")
+
+
+    def test_single_line_expan_also_wraps_glyphs(self):
+        """
+        Consistency: the single-line expansion path must also wrap surviving
+        special characters in <g> inside <expan>.  Here 'ſã' (long-s glyph +
+        combining-tilde glyph) expands to 'ſan': the long-s survives and must
+        be emitted as <g ref="#char017f">ſ</g> in <expan>, not as a bare
+        U+017F character.
+        """
+        body = (
+            '<lb xml:id="lb-A"/>'
+            'incipit <g ref="#char017f">\u017f</g>'
+            '<g ref="#chara0303">\u00e3</g> finit'
+        )
+        # ſã -> ſan : long-s survives (glyph), ã -> an (real replace)
+        def pipeline(rows, pre_annotated):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-A"] = "incipit \u017fan finit"
+            return exp, {}
+        result = process_tei_xml(self._make_doc(body), pipeline)
+        choices = self._choices(result)
+        self.assertEqual(len(choices), 1)
+        expan = choices[0].find(f"{{{TEI_NS}}}expan")
+        # itertext still reads the full expansion
+        self.assertEqual("".join(expan.itertext()), "\u017fan")
+        # and the long-s is a <g ref="#char017f">, not a bare character
+        g = expan.findall(f"{{{TEI_NS}}}g")
+        self.assertEqual(len(g), 1, "single-line <expan> must wrap the long-s in <g>")
+        self.assertEqual(g[0].get("ref"), "#char017f")
+        self.assertEqual(g[0].text, "\u017f")
 
 
 if __name__ == "__main__":

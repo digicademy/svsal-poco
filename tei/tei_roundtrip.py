@@ -1382,8 +1382,12 @@ def _apply_cross_line_choice(
         lb2_clone, abbr_el, line2.text_runs, l2_content_start, word_end_in_l2,
     )
 
-    # <expan>: exp_part1 + <lb sameAs="#id" break="no" xml:id="…"/> + exp_part2
-    expan_el.text = exp_part1
+    # <expan>: exp_part1 + <lb sameAs="#id" break="no" xml:id="…"/> + exp_part2.
+    # Re-wrap any special characters (e.g. a surviving long-s) in the same <g>
+    # markup they carry inside <abbr>, so <expan> mirrors the diplomatic glyphs
+    # rather than emitting bare fallback characters.
+    glyph_map = _build_glyph_map(abbr_el)
+    _emit_expansion_with_glyphs(expan_el, None, exp_part1, glyph_map)
     lb_same = etree.SubElement(expan_el, _tag("lb"))
     if lb2_id:
         lb_same.set("sameAs", f"#{lb2_id}")
@@ -1394,7 +1398,7 @@ def _apply_cross_line_choice(
         if lb_same_id != lb2_id:
             _set_xml_id(lb_same, lb_same_id)
     lb_same.set("break", "no")
-    lb_same.tail = exp_part2
+    _emit_expansion_with_glyphs(expan_el, lb_same, exp_part2, glyph_map)
 
     # --- Tree surgery ---
     _truncate_line_end(line1, word_start_in_l1)
@@ -1487,6 +1491,85 @@ def _populate_abbr_from_runs_as_tail(
             last_child = cloned
         else:
             last_child.tail = (last_child.tail or "") + portion
+
+
+def _build_glyph_map(source_el: etree._Element) -> dict[str, etree._Element]:
+    """Harvest a character → <g> template map from an element's <g> glyphs.
+
+    Used to re-wrap special characters in <expan> the same way they appear in
+    <abbr>: e.g. a long-s that survives an expansion (ſucce[lb]dãt → ſuccedant)
+    should be emitted as <g ref="#char017f">ſ</g>, not as a bare U+017F, mirror-
+    ing the diplomatic markup of the token.
+
+    Only single-character glyphs are mapped (the corpus convention — ſ, ã, &,
+    …); the first occurrence of each character wins, so all instances of that
+    character in the expansion are wrapped with the same @ref.
+    """
+    glyph_map: dict[str, etree._Element] = {}
+    for g in source_el.iter(_tag("g")):
+        if g.text and len(g.text) == 1:
+            glyph_map.setdefault(g.text, g)
+    return glyph_map
+
+
+def _emit_expansion_with_glyphs(
+    parent:    etree._Element,
+    anchor:    Optional[etree._Element],
+    text:      str,
+    glyph_map: dict[str, etree._Element],
+) -> Optional[etree._Element]:
+    """Emit ``text`` into ``parent`` as mixed content, wrapping every character
+    present in ``glyph_map`` in a clone of its <g> element.
+
+    ``anchor is None``: the text/elements become ``parent``'s leading content
+    (``parent.text`` plus appended <g> children).
+    ``anchor`` given:   the text/elements are placed *after* ``anchor`` (its
+    ``.tail`` plus following siblings) — used to emit the post-<lb/> part of a
+    cross-line <expan>.
+
+    Returns the last element emitted, or ``anchor`` if the text was plain.
+    """
+    if not glyph_map:
+        # Fast path: no special characters to wrap — keep it as flat text.
+        if anchor is None:
+            parent.text = (parent.text or "") + text
+        else:
+            anchor.tail = (anchor.tail or "") + text
+        return anchor
+
+    last = anchor
+    buf: list[str] = []
+
+    def _flush() -> None:
+        nonlocal last
+        s = "".join(buf)
+        buf.clear()
+        if not s:
+            return
+        if last is None:
+            parent.text = (parent.text or "") + s
+        else:
+            last.tail = (last.tail or "") + s
+
+    for ch in text:
+        tmpl = glyph_map.get(ch)
+        if tmpl is None:
+            buf.append(ch)
+            continue
+        _flush()
+        g = copy.deepcopy(tmpl)
+        g.text = ch
+        g.tail = None
+        for child in list(g):
+            g.remove(child)
+        if last is None:
+            parent.append(g)
+        else:
+            parent.insert(parent.index(last) + 1, g)
+        last = g
+
+    _flush()
+    return last
 
 
 def _truncate_line_end(line: ExtractedLine, at_offset: int) -> None:
@@ -1944,7 +2027,6 @@ def _apply_change_preserving_markup(
     abbr_el = etree.SubElement(choice, _tag("abbr"))
     expan_el = etree.SubElement(choice, _tag("expan"))
     expan_el.set("resp", _expansion_resp())
-    expan_el.text = expan_text
 
     # --- Build <abbr> content preserving inline elements ---
     abbr_last_child = None  # tracks last element appended to abbr
@@ -1972,6 +2054,13 @@ def _apply_change_preserving_markup(
                 abbr_last_child.tail = (abbr_last_child.tail or "") + text_portion
             else:
                 abbr_el.text = (abbr_el.text or "") + text_portion
+
+    # --- Build <expan> content, re-wrapping any special characters in the same
+    # <g> markup they carry inside <abbr> (deferred until <abbr> is built so the
+    # glyph map can be harvested from it).
+    _emit_expansion_with_glyphs(
+        expan_el, None, expan_text, _build_glyph_map(abbr_el),
+    )
 
     # --- Determine insertion point ---
     if first_run.is_tail:
