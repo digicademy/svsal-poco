@@ -2416,7 +2416,9 @@ def _ensure_app_info(
         app.set("version", "1.0")
         app.set("notAfter", processing_date)
         # content model: model.labelLike+ , (model.ptrLike* | model.pLike*)
-        etree.SubElement(app, _tag("label")).text = label
+        label_el = etree.SubElement(app, _tag("label"))
+        label_el.text = label
+        _set_xml_id(label_el, f"{xml_id}-label")
         desc_el = etree.SubElement(app, _tag("desc"))
         desc_el.set(f"{{{XML_NS}}}lang", "en")
         desc_el.text = desc
