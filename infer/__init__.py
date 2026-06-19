@@ -15,6 +15,7 @@
 import json
 import re
 import argparse
+import difflib
 import torch
 from pathlib import Path
 from collections import defaultdict
@@ -218,48 +219,153 @@ def _split_window_output_parts(
     split_pattern: re.Pattern,
 ) -> tuple[list[str], Optional[str]]:
     """
-    Split a window output into line parts.
+    Split a window output into line parts on the separator tokens.
 
-    Returns (parts, warning_suffix). warning_suffix is None on exact split.
+    The number of parts is NOT forced here: when the model drops, merges, or
+    inserts a separator the raw split count will differ from expected, and
+    _recover_window_parts realigns the parts to the source lines rather than
+    relying on their position.  An earlier version collapsed the parts to
+    expected_parts via maxsplit, which silently mis-merged whenever the
+    miscounted separator was not the last one; returning the honest raw split
+    lets the alignment see every boundary.
+
+    Returns (parts, note).  note is set only to report a count mismatch.
     """
     if expected_parts <= 1:
         return [output], None
 
-    raw_parts = split_pattern.split(output)
-    if len(raw_parts) == expected_parts:
-        return raw_parts, None
+    parts = split_pattern.split(output)
+    note = None
+    if len(parts) != expected_parts:
+        note = f"split produced {len(parts)} part(s), expected {expected_parts}"
+    return parts, note
 
-    limited_parts = split_pattern.split(output, maxsplit=expected_parts - 1)
-    if len(limited_parts) == expected_parts:
-        return limited_parts, (
-            f"recovered via maxsplit (raw split produced {len(raw_parts)} parts)"
-        )
 
-    return raw_parts, None
+def _line_similarity(a: str, b: str) -> float:
+    """Similarity in [0, 1] between a source line and a candidate output part.
+
+    Abbreviation expansion only adds or rewrites the abbreviated tokens, so a
+    correct output part shares most of its characters, in order, with its
+    source line; difflib's ratio captures that.  A dropped/unrelated line — a
+    neighbour's text, or a different reference — scores low.
+    """
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
+def _align_parts_to_sources(
+    parts:        list[str],
+    source_lines: list[str],
+    skip_penalty: float = 0.4,
+) -> tuple[list[str], list[int]]:
+    """
+    Align model output parts to the window's source lines by content.
+
+    Returns (recovered, filled_from_source) where recovered has exactly
+    len(source_lines) entries: recovered[i] is the output part that aligns to
+    source_lines[i], or source_lines[i] itself when the model dropped, merged
+    away, or truncated that line.  filled_from_source lists those fallback
+    indices.
+
+    The alignment is a minimum-cost edit alignment over *lines*: matching
+    source[i] to part[j] costs ``1 - _line_similarity(i, j)``; skipping a
+    source line (model dropped/truncated it) or an extra part (model emitted a
+    spurious separator) each cost ``skip_penalty``.
+
+    With ``skip_penalty < 0.5`` the alignment has two useful guarantees:
+      * a source line is matched to its own expansion whenever their
+        similarity exceeds ``1 - 2*skip_penalty`` (0.2 by default) — low enough
+        that even heavily abbreviated lines match; and
+      * a source line whose own part was dropped is *skipped* (kept as source)
+        rather than matched to a leftover part, as long as that leftover is
+        less than ``1 - skip_penalty`` (0.6) similar — so an owned line can
+        never inherit an unrelated neighbour's content; at worst it falls back
+        to its own source.
+    """
+    m, n = len(source_lines), len(parts)
+    if n == 0:
+        return list(source_lines), list(range(m))
+
+    INF = float("inf")
+    dp = [[INF] * (n + 1) for _ in range(m + 1)]
+    back: list[list[Optional[tuple]]] = [[None] * (n + 1) for _ in range(m + 1)]
+    dp[0][0] = 0.0
+    for i in range(m + 1):
+        for j in range(n + 1):
+            cur = dp[i][j]
+            if cur == INF:
+                continue
+            if i < m and j < n:  # match source[i] with part[j]
+                c = cur + (1.0 - _line_similarity(source_lines[i], parts[j]))
+                if c < dp[i + 1][j + 1]:
+                    dp[i + 1][j + 1] = c
+                    back[i + 1][j + 1] = ("match", i, j)
+            if i < m:  # skip source[i] (dropped/truncated → keep source)
+                c = cur + skip_penalty
+                if c < dp[i + 1][j]:
+                    dp[i + 1][j] = c
+                    back[i + 1][j] = ("skip_src", i, j)
+            if j < n:  # skip part[j] (spurious extra output)
+                c = cur + skip_penalty
+                if c < dp[i][j + 1]:
+                    dp[i][j + 1] = c
+                    back[i][j + 1] = ("skip_part", i, j)
+
+    recovered = list(source_lines)
+    matched = [False] * m
+    i, j = m, n
+    while (i, j) != (0, 0):
+        op, pi, pj = back[i][j]
+        if op == "match":
+            recovered[pi] = parts[pj]
+            matched[pi] = True
+        i, j = pi, pj
+
+    filled = [k for k in range(m) if not matched[k]]
+    return recovered, filled
 
 
 def _recover_window_parts(
-    parts: list[str],
+    parts:          list[str],
     expected_parts: int,
-    source_lines: list[str],
+    source_lines:   list[str],
+    owned_range:    Optional[tuple[int, int]] = None,
 ) -> tuple[list[str], list[str]]:
     """
-    Recover window parts to expected_parts using conservative best effort.
+    Recover window parts to exactly one entry per source line, source-aware.
 
-    Returns (recovered_parts, recovery_notes).
+    Aligns the model's output parts to the window's source lines so that a
+    dropped, merged, or truncated line falls back to *its own* source instead
+    of shifting every later line — which previously corrupted the owned line
+    (it inherited the next line's expansion).  Returns (recovered, notes);
+    recovered has length ``expected_parts`` (== len(source_lines)).
+
+    ``owned_range`` (owned_start, owned_end) is used only to raise a louder
+    note when an *owned* line — the line whose output this window actually
+    keeps — had to fall back to source, which is the case worth watching.
     """
-    recovered = list(parts)
+    recovered, filled = _align_parts_to_sources(parts, source_lines)
+
     notes: list[str] = []
-
-    if len(recovered) > expected_parts:
-        overflow = len(recovered) - expected_parts + 1
-        recovered = recovered[:expected_parts - 1] + ["".join(recovered[expected_parts - 1:])]
-        notes.append(f"collapsed {overflow} overflow part(s) into final line")
-
-    if len(recovered) < expected_parts:
-        missing_count = expected_parts - len(recovered)
-        recovered.extend(source_lines[len(recovered):expected_parts])
-        notes.append(f"filled {missing_count} missing part(s) from original source lines")
+    if filled:
+        notes.append(
+            f"kept {len(filled)} line(s) from source "
+            f"(model dropped/merged/truncated them)"
+        )
+        if owned_range is not None:
+            o_start, o_end = owned_range
+            owned_filled = [k for k in filled if o_start <= k < o_end]
+            if owned_filled:
+                notes.append(
+                    f"OWNED line(s) at offset(s) {owned_filled} had no aligned "
+                    f"model output and were left unexpanded"
+                )
+    extra = len(parts) - len(source_lines)
+    if extra > 0:
+        notes.append(f"ignored {extra} unaligned extra output part(s)")
 
     return recovered, notes
 
@@ -458,6 +564,7 @@ def run_pipeline(
         source_lines = [lines_with_boundaries[idx]["source_sic"] for idx in indices]
         recovered, warning_notes = _recover_window_parts(
             parts, expected_parts, source_lines,
+            owned_range=(owned_start, owned_end),
         )
         if split_note:
             warning_notes.append(split_note)
