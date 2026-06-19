@@ -1151,5 +1151,151 @@ class TestCrossLineAbbrWithWhitespaceAroundLb(unittest.TestCase):
         self.assertEqual(g[0].text, "\u017f")
 
 
+class TestInsertionDeletionExpansion(unittest.TestCase):
+    """
+    Regression tests for expansions that diff as insertions/deletions rather
+    than replacements.
+
+    _find_changes originally collected only SequenceMatcher "replace" opcodes.
+    When an expansion keeps the special characters and only *adds* plain ones
+    around them — e.g. ſcm → ſanctum, where the surviving ſ/c/m anchor the
+    inserted 'an'/'tu' — SequenceMatcher emits "insert" opcodes, so the change
+    was silently dropped and the abbreviation left unwrapped.  (This matters
+    because the expansion model leans on special-character replacement; an
+    insertion-shaped expansion must still round-trip.)
+
+    The fix collects "insert"/"delete" opcodes too, but only when they are
+    intra-token (the added/removed text carries no whitespace or LINE_SEP), so
+    a whole-word insertion/deletion is never folded into an adjacent token.
+    """
+
+    def _make_doc(self, body: str) -> str:
+        return (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0">'
+            '<teiHeader><fileDesc><titleStmt><title>T</title></titleStmt>'
+            '<publicationStmt><p/></publicationStmt>'
+            '<sourceDesc><p/></sourceDesc></fileDesc></teiHeader>'
+            '<text><body><p>' + body + '</p></body></text></TEI>'
+        )
+
+    def _body_el(self, result: str):
+        return etree.fromstring(result.encode()).find(
+            f"{{{TEI_NS}}}text/{{{TEI_NS}}}body")
+
+    def _choices(self, result: str) -> list:
+        return self._body_el(result).findall(f".//{{{TEI_NS}}}choice")
+
+    def _run(self, body, expmap, boundaries=None):
+        boundaries = boundaries or {}
+
+        def pipeline(rows, pre_annotated):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp.update(expmap)
+            return exp, boundaries
+        return process_tei_xml(self._make_doc(body), pipeline)
+
+    def test_single_line_intra_word_insertion_wraps(self):
+        """ſcm → ſanctum (insertions only) must produce a <choice>."""
+        result = self._run(
+            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">\u017f</g>cm finit',
+            {"lb-A": "incipit \u017fanctum finit"},
+        )
+        choices = self._choices(result)
+        self.assertEqual(len(choices), 1,
+                         "An insertion-shaped expansion must still be wrapped.")
+        abbr = choices[0].find(f"{{{TEI_NS}}}abbr")
+        expan = choices[0].find(f"{{{TEI_NS}}}expan")
+        self.assertEqual("".join(abbr.itertext()), "\u017fcm")
+        self.assertEqual("".join(expan.itertext()), "\u017fanctum")
+        # The surviving long-s keeps its <g> markup in both branches.
+        self.assertEqual(abbr.find(f"{{{TEI_NS}}}g").get("ref"), "#char017f")
+        self.assertEqual(expan.find(f"{{{TEI_NS}}}g").get("ref"), "#char017f")
+
+    def test_cross_line_intra_word_insertion_wraps(self):
+        """
+        A token split across a nonbreaking break whose expansion is insertion-
+        shaped on each line (ſc[lb]m → ſanctum) must produce ONE cross-line
+        <choice>.
+        """
+        body = (
+            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">\u017f</g>c\n'
+            '<lb xml:id="lb-B"/>m finit'
+        )
+        result = self._run(
+            body,
+            {"lb-A": "incipit \u017fanc\n", "lb-B": "tum finit"},
+            {"lb-A": "lb-B"},
+        )
+        choices = self._choices(result)
+        self.assertEqual(len(choices), 1)
+        abbr = choices[0].find(f"{{{TEI_NS}}}abbr")
+        self.assertIsNotNone(abbr.find(f"{{{TEI_NS}}}lb"),
+                             "Cross-line insertion must wrap the <lb/> in <abbr>.")
+        self.assertEqual("".join(abbr.itertext()), "\u017fcm")
+        self.assertEqual(
+            "".join(choices[0].find(f"{{{TEI_NS}}}expan").itertext()),
+            "\u017fanctum")
+
+    def test_within_word_deletion_wraps(self):
+        """ſanctum → ſcm (deletions only) must produce a <choice>."""
+        result = self._run(
+            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">\u017f</g>anctum finit',
+            {"lb-A": "incipit \u017fcm finit"},
+        )
+        choices = self._choices(result)
+        self.assertEqual(len(choices), 1)
+        self.assertEqual(
+            "".join(choices[0].find(f"{{{TEI_NS}}}abbr").itertext()), "\u017fanctum")
+        self.assertEqual(
+            "".join(choices[0].find(f"{{{TEI_NS}}}expan").itertext()), "\u017fcm")
+
+    def test_whole_word_insertion_makes_no_choice(self):
+        """
+        A model that inserts a whole new word must NOT have it folded into an
+        adjacent token as a spurious 'alpha → alpha beta' expansion.
+        """
+        result = self._run(
+            '<lb xml:id="lb-A"/>alpha gamma delta',
+            {"lb-A": "alpha beta gamma delta"},
+        )
+        self.assertEqual(len(self._choices(result)), 0)
+
+    def test_whole_word_deletion_makes_no_choice(self):
+        """A model that drops a whole word must not create a choice."""
+        result = self._run(
+            '<lb xml:id="lb-A"/>alpha beta gamma delta',
+            {"lb-A": "alpha gamma delta"},
+        )
+        self.assertEqual(len(self._choices(result)), 0)
+
+    def test_multiword_expansion_still_wraps(self):
+        """
+        A single abbreviation that expands to multiple words ('&c' → 'et
+        cetera') is a 'replace' opcode and must still be wrapped, with the
+        space-containing expansion intact in <expan>.
+        """
+        result = self._run(
+            '<lb xml:id="lb-A"/>foo <g ref="#char0026">&amp;</g>c bar',
+            {"lb-A": "foo et cetera bar"},
+        )
+        choices = self._choices(result)
+        self.assertEqual(len(choices), 1)
+        self.assertEqual(
+            "".join(choices[0].find(f"{{{TEI_NS}}}abbr").itertext()), "&c")
+        self.assertEqual(
+            "".join(choices[0].find(f"{{{TEI_NS}}}expan").itertext()), "et cetera")
+
+    def test_combining_mark_only_deletion_filtered(self):
+        """
+        A combining-mark-only difference (a+◌̃ → a) that diffs as a deletion
+        must still be neutralised by the glyph-variant filter — no <choice>.
+        """
+        result = self._run(
+            '<lb xml:id="lb-A"/>foo ba\u0303r baz',  # 'a' + combining tilde
+            {"lb-A": "foo bar baz"},
+        )
+        self.assertEqual(len(self._choices(result)), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
