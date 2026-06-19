@@ -366,8 +366,11 @@ def _recover_window_parts(
     recovered has length ``expected_parts`` (== len(source_lines)).
 
     ``owned_range`` (owned_start, owned_end) is used only to raise a louder
-    note when an *owned* line — the line whose output this window actually
-    keeps — had to fall back to source, which is the case worth watching.
+    note about the *owned* line — the line whose output this window actually
+    keeps — in the two cases worth watching: it fell back to source (no aligned
+    output at all), or it matched only a short fragment of the output, which is
+    the signature of an over-split (the model emitted a spurious separator
+    inside the line, so only one fragment aligned and the rest was dropped).
     """
     recovered, filled = _align_parts_to_sources(parts, source_lines)
 
@@ -377,14 +380,34 @@ def _recover_window_parts(
             f"kept {len(filled)} line(s) from source "
             f"(model dropped/merged/truncated them)"
         )
-        if owned_range is not None:
-            o_start, o_end = owned_range
-            owned_filled = [k for k in filled if o_start <= k < o_end]
-            if owned_filled:
-                notes.append(
-                    f"OWNED line(s) at offset(s) {owned_filled} had no aligned "
-                    f"model output and were left unexpanded"
-                )
+    if owned_range is not None:
+        o_start, o_end = owned_range
+        owned_filled = [k for k in filled if o_start <= k < o_end]
+        if owned_filled:
+            notes.append(
+                f"OWNED line(s) at offset(s) {owned_filled} had no aligned "
+                f"model output and were left unexpanded"
+            )
+        # An owned line that *matched* but whose recovered text is much shorter
+        # than its source almost certainly got only one fragment of an
+        # over-split output (expansions are never meaningfully shorter than
+        # their source).  Surface it so the rate of this otherwise-silent case
+        # is measurable; the dropped fragment is not recovered.
+        FRAGMENT_RATIO = 0.6
+        MIN_SOURCE_LEN = 8  # ignore very short lines, where the ratio is noisy
+        owned_fragment = [
+            k for k in range(o_start, o_end)
+            if k not in filled
+            and len(source_lines[k]) >= MIN_SOURCE_LEN
+            and len(recovered[k]) < FRAGMENT_RATIO * len(source_lines[k])
+        ]
+        if owned_fragment:
+            notes.append(
+                f"OWNED line(s) at offset(s) {owned_fragment} matched only a "
+                f"short fragment of the model output (possible over-split; "
+                f"remainder dropped)"
+            )
+
     extra = len(parts) - len(source_lines)
     if extra > 0:
         notes.append(f"ignored {extra} unaligned extra output part(s)")

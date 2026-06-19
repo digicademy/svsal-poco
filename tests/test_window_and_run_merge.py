@@ -116,6 +116,26 @@ class WindowSplitRecoveryTests(unittest.TestCase):
         recovered, notes = self.recover_parts(parts, 1, src, owned_range=(0, 1))
         self.assertEqual(recovered[0], "476. col. 2. nu. 1.")
 
+    def test_over_split_owned_line_flagged_as_fragment(self):
+        # The model emits a spurious separator inside the owned line, so its
+        # output arrives as two parts; only the first fragment aligns.  The
+        # owned line is matched (not dropped) but to a short fragment, which
+        # must be surfaced so the over-split rate is measurable.
+        src = ["alpha beta gamma delta epsilon"]
+        parts = ["alpha beta gamma", "delta epsilon"]
+        recovered, notes = self.recover_parts(parts, 1, src, owned_range=(0, 1))
+        self.assertEqual(recovered[0], "alpha beta gamma")
+        self.assertTrue(any("fragment" in n.lower() for n in notes),
+                        f"expected an over-split fragment note, got {notes}")
+
+    def test_full_match_owned_line_not_flagged_as_fragment(self):
+        # A clean full match must NOT raise the fragment note.
+        src = ["alpha beta gamma delta"]
+        parts = ["alpha beta gamma delta"]
+        recovered, notes = self.recover_parts(parts, 1, src, owned_range=(0, 1))
+        self.assertEqual(recovered[0], "alpha beta gamma delta")
+        self.assertFalse(any("fragment" in n.lower() for n in notes))
+
 
 class SharedRunMergeTests(unittest.TestCase):
     @classmethod
