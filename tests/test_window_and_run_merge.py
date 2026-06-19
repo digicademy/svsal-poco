@@ -58,8 +58,8 @@ class SharedRunMergeTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         funcs = _load_functions(
             root / "tei" / "tei_roundtrip.py",
-            ["_merge_changes_by_shared_runs"],
-            {"TextRun": object},
+            ["_merge_changes_by_shared_runs", "_contains_whitespace"],
+            {"TextRun": object, "LINE_SEP": "\u00ac"},
         )
         cls.merge_changes = staticmethod(funcs["_merge_changes_by_shared_runs"])
 

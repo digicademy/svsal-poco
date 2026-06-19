@@ -1151,5 +1151,170 @@ class TestCrossLineAbbrWithWhitespaceAroundLb(unittest.TestCase):
         self.assertEqual(g[0].text, "\u017f")
 
 
+class TestSeparateAbbreviationsNotMerged(unittest.TestCase):
+    """
+    Two distinct abbreviations on one line must produce two separate <choice>
+    elements, never a single multi-token <abbr>.
+
+    Regression: _merge_changes_by_shared_runs merged any two changes that
+    shared a tree node.  A <g>'s tail can span from one word into the next
+    ("…itat<g>ẽ</g> fidelium bonor<g>ũ</g>"), making the "…ẽ" element and the
+    " fidelium bonor" tail the same node, so two separate abbreviations were
+    fused into one <choice> whose <abbr> swallowed the unchanged word between
+    them.  The merge is now gated on the gap between changes being
+    whitespace-free (i.e. the same token).
+    """
+
+    NS = f"{{{TEI_NS}}}"
+
+    def _doc(self, body):
+        return (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0"><teiHeader><fileDesc>'
+            '<titleStmt><title>T</title></titleStmt>'
+            '<publicationStmt><p/></publicationStmt>'
+            '<sourceDesc><p/></sourceDesc></fileDesc></teiHeader>'
+            '<text><body><p>' + body + '</p></body></text></TEI>'
+        )
+
+    def _choices(self, result):
+        body = etree.fromstring(result.encode()).find(
+            f"{self.NS}text/{self.NS}body")
+        return body.findall(f".//{self.NS}choice")
+
+    def test_two_abbr_with_unchanged_word_between_stay_separate(self):
+        body = (
+            '<lb xml:id="lb-1"/>quare vniuer<g ref="#char017f">\u017f</g>itat'
+            '<g ref="#chare0303">\u1ebd</g> fidelium bonor<g ref="#charu0303">\u0169</g>'
+        )
+
+        def pipeline(rows, pre):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-1"] = "quare vniuer\u017fitatem fidelium bonorum"
+            return exp, {}
+
+        choices = self._choices(process_tei_xml(self._doc(body), pipeline))
+        self.assertEqual(len(choices), 2,
+                         "Two abbreviations must yield two separate <choice>s.")
+        abbrs = ["".join(c.find(f"{self.NS}abbr").itertext()) for c in choices]
+        self.assertEqual(abbrs, ["vniuer\u017fitat\u1ebd", "bonor\u0169"])
+        # The unchanged word between them must NOT be inside any <abbr>.
+        for a in abbrs:
+            self.assertNotIn("fidelium", a)
+            self.assertNotIn(" ", a)
+
+    def test_two_adjacent_abbr_stay_separate(self):
+        # Two abbreviations immediately following one another (only a space
+        # between) must also stay separate.
+        body = (
+            '<lb xml:id="lb-1"/>foo e<g ref="#chara0303">\u00e3</g> '
+            'n<g ref="#charo0303">\u00f5</g> bar'
+        )
+
+        def pipeline(rows, pre):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-1"] = "foo eam non bar"
+            return exp, {}
+
+        choices = self._choices(process_tei_xml(self._doc(body), pipeline))
+        self.assertEqual(len(choices), 2)
+        abbrs = ["".join(c.find(f"{self.NS}abbr").itertext()) for c in choices]
+        self.assertEqual(abbrs, ["e\u00e3", "n\u00f5"])
+
+
+class TestExtractionDoesNotBleedAcrossItems(unittest.TestCase):
+    """
+    A line's extracted plain_text must stop at the next <lb/> in document
+    order, even when items/lists close and reopen between the two lines.
+
+    Regression: _walk_into descended into the subtree holding next_lb and
+    stopped there, but its child loop then continued to the *following*
+    sibling subtree (the next <item>), bleeding that item's text into the
+    current line.
+    """
+
+    def test_line_text_stops_at_item_boundary(self):
+        doc = (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>'
+            '<item><list>'
+            '<item xml:id="it-1"><lb xml:id="lb-a"/>Bonitas creaturarum'
+            '<lb xml:id="lb-b"/>maiorem. pa. 112. n. 1.</item>'
+            '</list></item>'
+            '<item xml:id="it-2"><list type="index">'
+            '<head><lb xml:id="lb-c"/>C</head>'
+            '<item xml:id="it-3"><lb xml:id="lb-d"/>Caelum dicitur. pag. 53.'
+            '<lb xml:id="lb-e"/>circa med.</item>'
+            '</list></item>'
+            '</body></text></TEI>'
+        )
+        tree = etree.ElementTree(etree.fromstring(doc.encode()))
+        lines, _ = extract_lines(tree)
+        by_id = {ln.line_id: ln.plain_text for ln in lines}
+        # lb-b is the last line of it-1; it must NOT contain it-3's content.
+        self.assertNotIn("Caelum", by_id["lb-b"])
+        self.assertNotIn("circa med", by_id["lb-b"])
+        self.assertEqual(by_id["lb-b"].strip(), "maiorem. pa. 112. n. 1.")
+        # The head and the next item's lines are extracted in their own right.
+        self.assertEqual(by_id["lb-c"], "C")
+        self.assertIn("Caelum dicitur", by_id["lb-d"])
+
+
+class TestSingleTokenAbbrGuard(unittest.TestCase):
+    """
+    A TEI <abbr> wraps a single token.  A change whose abbr (original) side
+    spans whitespace — e.g. a wholesale-wrong expansion of a literature
+    reference, where source "476. col. 2. nu. 1." is replaced by unrelated
+    multi-word text — must not be emitted as a multi-token <choice>.  Genuine
+    multi-*word* expansions of a single token ("&c" → "et cetera") are kept.
+    """
+
+    NS = f"{{{TEI_NS}}}"
+
+    def _doc(self, body):
+        return (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0"><teiHeader><fileDesc>'
+            '<titleStmt><title>T</title></titleStmt>'
+            '<publicationStmt><p/></publicationStmt>'
+            '<sourceDesc><p/></sourceDesc></fileDesc></teiHeader>'
+            '<text><body><p>' + body + '</p></body></text></TEI>'
+        )
+
+    def _choices(self, result):
+        body = etree.fromstring(result.encode()).find(
+            f"{self.NS}text/{self.NS}body")
+        return body.findall(f".//{self.NS}choice")
+
+    def test_no_multitoken_abbr_from_wholesale_replacement(self):
+        body = '<lb xml:id="lb-1"/>476. col. 2. nu. 1.'
+
+        def pipeline(rows, pre):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            # Upstream misalignment/hallucination: the whole reference becomes
+            # an unrelated multi-word string.
+            exp["lb-1"] = "Concilia vniuer\u017falia quem ordinem habeant"
+            return exp, {}
+
+        choices = self._choices(process_tei_xml(self._doc(body), pipeline))
+        for c in choices:
+            abbr_text = "".join(c.find(f"{self.NS}abbr").itertext())
+            self.assertNotIn(
+                " ", abbr_text,
+                f"No <abbr> may span whitespace; got {abbr_text!r}.")
+
+    def test_multiword_expansion_of_single_token_kept(self):
+        body = '<lb xml:id="lb-1"/>foo <g ref="#char0026">&amp;</g>c bar'
+
+        def pipeline(rows, pre):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-1"] = "foo et cetera bar"
+            return exp, {}
+
+        choices = self._choices(process_tei_xml(self._doc(body), pipeline))
+        self.assertEqual(len(choices), 1)
+        self.assertEqual(
+            "".join(choices[0].find(f"{self.NS}abbr").itertext()), "&c")
+        self.assertEqual(
+            "".join(choices[0].find(f"{self.NS}expan").itertext()), "et cetera")
+
+
 if __name__ == "__main__":
     unittest.main()
