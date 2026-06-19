@@ -24,32 +24,97 @@ def _load_functions(path: Path, names: list[str], globals_dict: dict):
 class WindowSplitRecoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        import difflib
         root = Path(__file__).resolve().parents[1]
         funcs = _load_functions(
             root / "infer" / "__init__.py",
-            ["_split_window_output_parts", "_recover_window_parts"],
-            {"re": re, "Optional": Optional},
+            [
+                "_split_window_output_parts",
+                "_recover_window_parts",
+                "_align_parts_to_sources",
+                "_line_similarity",
+            ],
+            {"re": re, "Optional": Optional, "difflib": difflib},
         )
         cls.split_parts = staticmethod(funcs["_split_window_output_parts"])
         cls.recover_parts = staticmethod(funcs["_recover_window_parts"])
         cls.pattern = re.compile("[¬↵]")
+
+    # --- splitting -----------------------------------------------------------
 
     def test_split_exact_match(self):
         parts, note = self.split_parts("a¬b↵c", 3, self.pattern)
         self.assertEqual(parts, ["a", "b", "c"])
         self.assertIsNone(note)
 
-    def test_split_uses_maxsplit_recovery(self):
+    def test_split_returns_raw_parts_and_reports_mismatch(self):
+        # The split no longer force-collapses with maxsplit (which mis-merged
+        # whenever the miscounted separator was not the last one); it returns
+        # every boundary and flags the count so recovery can realign.
         parts, note = self.split_parts("a¬b¬c", 2, self.pattern)
-        self.assertEqual(parts, ["a", "b¬c"])
-        self.assertIn("recovered via maxsplit", note)
+        self.assertEqual(parts, ["a", "b", "c"])
+        self.assertIn("expected 2", note)
 
-    def test_recover_missing_parts_from_source(self):
+    # --- recovery / alignment ------------------------------------------------
+
+    def test_exact_counts_assign_positionally(self):
+        src = ["Concilia uniuersalia", "ſummus pontifex", "habeãt ordinem"]
+        parts = ["Concilia uniuersalia", "ſummus pontifex", "habeant ordinem"]
+        recovered, notes = self.recover_parts(parts, 3, src)
+        self.assertEqual(recovered, parts)
+        self.assertEqual(notes, [])
+
+    def test_dropped_middle_line_keeps_source_without_shifting(self):
+        # The reported bug: an out-of-distribution line ("476. col. 2. nu. 1.")
+        # is dropped by the model; the recovered owned line must keep its own
+        # source, NOT inherit the following line's expansion.
+        src = [
+            "tificem honorare debeant, oſtenditur. pa.",
+            "476. col. 2. nu. 1.",                       # owned, dropped
+            "Concilia uniuerſalia quem ordinem habeãt",
+        ]
+        parts = [
+            "tificem honorare debeant, oſtenditur. pa.",
+            "Concilia uniuerſalia quem ordinem habeant",  # the next line's expansion
+        ]
         recovered, notes = self.recover_parts(
-            ["exp-1", "exp-2"], 3, ["src-1", "src-2", "src-3"],
-        )
-        self.assertEqual(recovered, ["exp-1", "exp-2", "src-3"])
-        self.assertTrue(any("filled 1 missing part" in n for n in notes))
+            parts, 3, src, owned_range=(1, 2))
+        self.assertEqual(recovered[1], "476. col. 2. nu. 1.",
+                         "Owned line must keep its source, not the next line.")
+        self.assertEqual(recovered[0], src[0])
+        self.assertEqual(recovered[2], "Concilia uniuerſalia quem ordinem habeant")
+        self.assertTrue(any("OWNED" in n for n in notes))
+
+    def test_truncated_tail_keeps_source(self):
+        src = ["alpha line one", "beta line two", "gamma line three",
+               "delta line four"]
+        # Output cap truncates the last two lines.
+        parts = ["alpha line one", "beta line two"]
+        recovered, notes = self.recover_parts(parts, 4, src, owned_range=(0, 1))
+        self.assertEqual(recovered[:2], parts)
+        self.assertEqual(recovered[2], src[2])
+        self.assertEqual(recovered[3], src[3])
+        self.assertFalse(any("OWNED" in n for n in notes),
+                         "Owned line (offset 0) was generated, so no OWNED note.")
+
+    def test_extra_part_is_ignored_without_shifting(self):
+        src = ["prima linea texta", "secunda linea texta", "tertia linea texta"]
+        # Model emits a spurious separator splitting the FIRST line.
+        parts = ["prima linea", " texta", "secunda linea texta",
+                 "tertia linea texta"]
+        recovered, notes = self.recover_parts(parts, 3, src, owned_range=(1, 2))
+        # The two later lines must still land on their own source lines.
+        self.assertEqual(recovered[1], "secunda linea texta")
+        self.assertEqual(recovered[2], "tertia linea texta")
+        self.assertTrue(any("extra" in n for n in notes))
+
+    def test_unrelated_line_is_never_matched(self):
+        # A single source line whose own output was dropped, offered only an
+        # unrelated leftover part, must fall back to source — never adopt it.
+        src = ["476. col. 2. nu. 1."]
+        parts = ["Concilia uniuerſalia quem ordinem habeant"]
+        recovered, notes = self.recover_parts(parts, 1, src, owned_range=(0, 1))
+        self.assertEqual(recovered[0], "476. col. 2. nu. 1.")
 
 
 class SharedRunMergeTests(unittest.TestCase):
