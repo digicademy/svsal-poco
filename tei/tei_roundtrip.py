@@ -1856,9 +1856,29 @@ def _find_changes(
     sm = SequenceMatcher(None, original, expanded, autojunk=False)
     raw_changes: list[tuple[int, int, int, int]] = []
 
+    # Collect every non-equal opcode, not just "replace".  When an expansion
+    # keeps the special characters and only *adds* plain ones around them
+    # (e.g. ſcm → ſanctum, or a cross-line token whose surviving letters anchor
+    # the inserted ones), SequenceMatcher emits "insert"/"delete" opcodes
+    # rather than a single "replace".  Collecting only "replace" silently
+    # dropped those expansions, leaving the abbreviation unwrapped.
+    #
+    # Insertions/deletions are only kept when they are *intra-token*: the added
+    # (or removed) text must not contain whitespace or a LINE_SEP.  A whole-word
+    # insertion/deletion always carries the separating space, so this guard
+    # stops an inserted word from being mis-attributed as the expansion of an
+    # adjacent token (e.g. "alpha" → "alpha beta").  Multi-word expansions of a
+    # single abbreviation (e.g. "&c" → "et cetera") arrive as "replace" opcodes
+    # and are unaffected.
     for op, i1, i2, j1, j2 in sm.get_opcodes():
         if op == "replace":
             raw_changes.append((i1, i2, j1, j2))
+        elif op == "insert":
+            if not _contains_word_break(expanded[j1:j2]):
+                raw_changes.append((i1, i2, j1, j2))
+        elif op == "delete":
+            if not _contains_word_break(original[i1:i2]):
+                raw_changes.append((i1, i2, j1, j2))
 
     if not raw_changes:
         return []
@@ -1872,10 +1892,29 @@ def _find_changes(
         # Expand in expanded — use the same word context
         oj1 = _expand_left(expanded, j1)
         oj2 = _expand_right(expanded, j2)
+        # A pure insertion or deletion that sits between words (flanked by
+        # whitespace/LINE_SEP) expands to an empty range on one side and cannot
+        # be represented as <choice><abbr>…</abbr><expan>…</expan></choice> —
+        # both branches need a non-empty token — so skip it.  In-token
+        # insertions/deletions expand to the full word on both sides.
+        if oi1 >= oi2 or oj1 >= oj2:
+            continue
         changes.append((oi1, oi2, oj1, oj2))
+
+    if not changes:
+        return []
 
     # Merge overlapping/adjacent expanded ranges
     return _merge_changes(changes)
+
+
+def _contains_word_break(text: str) -> bool:
+    """True if ``text`` contains any whitespace or the LINE_SEP separator.
+
+    Used to tell an *intra-token* insertion/deletion (kept — it edits a single
+    word) from a *whole-word* one (skipped — it adds or removes entire words and
+    must not be folded into an adjacent abbreviation token)."""
+    return any(c.isspace() or c == LINE_SEP for c in text)
 
 
 def _expand_left(text: str, pos: int) -> int:
