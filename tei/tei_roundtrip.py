@@ -864,6 +864,31 @@ def _build_line_chains(
     return chains
 
 
+def _content_end_before(text: str, pos: int) -> int:
+    """Walk left from ``pos`` past trailing whitespace.
+
+    Returns the index just after the last non-whitespace character before
+    ``pos``.  Used to locate the real end of a line's content when the
+    LINE_SEP that replaced an <lb/> is preceded by pretty-print whitespace.
+    """
+    while pos > 0 and text[pos - 1].isspace():
+        pos -= 1
+    return pos
+
+
+def _content_start_after(text: str, pos: int) -> int:
+    """Walk right from ``pos`` past leading whitespace.
+
+    Returns the index of the first non-whitespace character at or after
+    ``pos`` (clamped to ``len(text)``).  Mirror of :func:`_content_end_before`
+    for the start of the line following a LINE_SEP.
+    """
+    n = len(text)
+    while pos < n and text[pos].isspace():
+        pos += 1
+    return pos
+
+
 def _merge_sep_adjacent_changes(
     changes:       list[tuple[int, int, int, int]],
     sep_positions: list[int],
@@ -902,16 +927,29 @@ def _merge_sep_adjacent_changes(
             continue
         exp_sep_pos = exp_sep_positions[k]
 
-        # Change whose right edge is exactly at sep_pos (L1 word boundary).
+        # An <lb/> in pretty-printed TEI is almost always surrounded by
+        # whitespace (newlines, indentation) — e.g. "ſucce\n  <lb/>dãt" — so
+        # the LINE_SEP that replaces it in the concatenated text rarely sits
+        # flush against L1's last word or L2's first word.  Compute the
+        # *content* boundaries (sep_pos minus L1 trailing whitespace, and
+        # sep_pos+len(SEP) plus L2 leading whitespace) so that word-boundary
+        # change edges still line up with the junction.  Without this, a
+        # single trailing newline on L1 made the leftward extension below a
+        # no-op and the cross-line abbreviation collapsed into an L2-only
+        # single-line <choice>.
+        l1_content_end = _content_end_before(orig_concat, sep_pos)
+        l2_content_start = _content_start_after(orig_concat, sep_pos + len(LINE_SEP))
+
+        # Change whose right edge is at L1's content boundary (last word).
         l1_idx = next(
             (i for i, (o1, o2, e1, e2) in enumerate(result)
-             if i not in removed and o2 == sep_pos),
+             if i not in removed and o2 == l1_content_end),
             None,
         )
-        # Change whose left edge starts immediately after sep_pos (L2 word boundary).
+        # Change whose left edge starts at L2's content boundary (first word).
         l2_idx = next(
             (i for i, (o1, o2, e1, e2) in enumerate(result)
-             if i not in removed and o1 == sep_pos + len(LINE_SEP)),
+             if i not in removed and o1 == l2_content_start),
             None,
         )
 
@@ -929,22 +967,25 @@ def _merge_sep_adjacent_changes(
             # _apply_cross_line_choice can wrap the full cross-line token.
             _l2_o1, l2_o2, _l2_e1, l2_e2 = result[l2_idx]
 
-            # Walk left from sep_pos in orig to find word start.
-            o_word_start = sep_pos
+            # Walk left from L1's content end (past any trailing whitespace)
+            # to the start of its last word.
+            o_word_start = l1_content_end
             while (o_word_start > 0
                    and not orig_concat[o_word_start - 1].isspace()
                    and orig_concat[o_word_start - 1] != LINE_SEP):
                 o_word_start -= 1
 
-            # Walk left from exp_sep_pos in exp to find the matching word start
-            # (L1 expansions may shift absolute positions in exp_concat).
-            e_word_start = exp_sep_pos
+            # Same on the exp side: skip trailing whitespace, then walk to the
+            # matching word start (L1 expansions may shift absolute positions
+            # in exp_concat).
+            exp_l1_content_end = _content_end_before(exp_concat, exp_sep_pos)
+            e_word_start = exp_l1_content_end
             while (e_word_start > 0
                    and not exp_concat[e_word_start - 1].isspace()
                    and exp_concat[e_word_start - 1] != LINE_SEP):
                 e_word_start -= 1
 
-            if o_word_start < sep_pos:
+            if o_word_start < l1_content_end:
                 result[l2_idx] = (o_word_start, l2_o2, e_word_start, l2_e2)
         # If only L1 exists, leave it as a single-line change (correct as-is).
 
@@ -1283,8 +1324,13 @@ def _apply_cross_line_choice(
 
     if LINE_SEP in exp_text:
         sep_idx = exp_text.index(LINE_SEP)
-        exp_part1 = l1_prefix + exp_text[:sep_idx]
-        exp_part2_raw = exp_text[sep_idx + len(LINE_SEP):]
+        # The LINE_SEP stands in for an <lb/> that, in pretty-printed TEI, is
+        # usually flanked by whitespace.  That whitespace is part of the
+        # layout, not the reading text, so trim it off the L1 tail and the L2
+        # head of the expansion — otherwise it surfaces inside <expan> as
+        # "ſucce\n<lb/>dant".
+        exp_part1 = (l1_prefix + exp_text[:sep_idx]).rstrip()
+        exp_part2_raw = exp_text[sep_idx + len(LINE_SEP):].lstrip()
         while exp_part2_raw and exp_part2_raw[-1] in WORD_BREAK_PUNCT:
             trailing_punct = exp_part2_raw[-1] + trailing_punct
             exp_part2_raw = exp_part2_raw[:-1]
@@ -1328,9 +1374,12 @@ def _apply_cross_line_choice(
     lb2_clone.tail = None
     abbr_el.append(lb2_clone)
 
-    # Add part2 from L2 as content after the <lb/> in <abbr>
+    # Add part2 from L2 as content after the <lb/> in <abbr>.  Start at
+    # l2_content_start (not 0) so any whitespace that followed the <lb/> in
+    # the source — i.e. leading layout whitespace on L2 — is not pulled into
+    # the abbreviation token.
     _populate_abbr_from_runs_as_tail(
-        lb2_clone, abbr_el, line2.text_runs, 0, word_end_in_l2,
+        lb2_clone, abbr_el, line2.text_runs, l2_content_start, word_end_in_l2,
     )
 
     # <expan>: exp_part1 + <lb sameAs="#id" break="no" xml:id="…"/> + exp_part2
