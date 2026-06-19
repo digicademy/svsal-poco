@@ -763,6 +763,15 @@ def _walk_into(
     for child in el:
         if next_lb is not None and child is next_lb:
             return
+        if next_lb is not None and _is_descendant_of(next_lb, child):
+            # next_lb lives inside this child's subtree.  Descend to collect the
+            # text that precedes it, then STOP — everything in document order
+            # after next_lb (including later sibling subtrees such as the next
+            # <item>) belongs to the next line.  Without this return the walk
+            # fell through to following siblings and bled the next item's text
+            # into this line.
+            _walk_into(child, next_lb, is_in_note, text_runs, notes)
+            return
         _walk_into(child, next_lb, is_in_note, text_runs, notes)
 
     # Tail text after the closing tag
@@ -1058,6 +1067,11 @@ def _apply_chain_expansion(
     for orig_start, orig_end, exp_start, exp_end in reversed(real_changes):
         orig_text = orig_concat[orig_start:orig_end]
         exp_text = exp_concat[exp_start:exp_end]
+
+        # A TEI <abbr> wraps a single token.  Refuse multi-token abbr spans
+        # (cross-line LINE_SEP spans are allowed — see _abbr_is_single_token).
+        if not _abbr_is_single_token(orig_text):
+            continue
 
         # Check if change spans a separator → cross-line
         crossed_seps = [s for s in sep_positions if orig_start <= s < orig_end]
@@ -1718,6 +1732,10 @@ def _apply_line_expansion(
         if _is_glyph_variant_only_change(orig_text, exp_text):
             continue
 
+        # A TEI <abbr> wraps a single token; refuse multi-token abbr spans.
+        if not _abbr_is_single_token(orig_text):
+            continue
+
         # Check if any notes fall inside this change range
         affected_notes = [
             n for n in line.notes
@@ -1769,8 +1787,18 @@ def _merge_changes_by_shared_runs(
             if run.plain_end > o1 and run.plain_start < o2
         }
 
-        if cur_run_nodes.intersection(next_run_nodes):
-            unchanged_between = original[cur_o2:o1] if o1 >= cur_o2 else ""
+        unchanged_between = original[cur_o2:o1] if o1 >= cur_o2 else ""
+        # Only merge two changes when they share a tree node AND belong to the
+        # same whitespace-delimited token.  Two *separate* abbreviations can
+        # share a node — e.g. a <g>'s tail that runs from one word into the
+        # next ("…itat<g>ẽ</g> fidelium bonor<g>ũ</g>") makes the "…ẽ" element
+        # and the " fidelium bonor" tail the same node — but they must stay
+        # separate <choice> elements (a multi-token <abbr> spanning whitespace
+        # is not TEI-compliant).  Merging is still required within a single
+        # token so the right-to-left tree surgery does not orphan a shared
+        # anchor, so we gate the merge on the gap being whitespace-free.
+        if (cur_run_nodes.intersection(next_run_nodes)
+                and not _contains_whitespace(unchanged_between)):
             cur_exp_text = cur_exp_text + unchanged_between + expanded[e1:e2]
             cur_o2 = max(cur_o2, o2)
             cur_run_nodes.update(next_run_nodes)
@@ -1782,6 +1810,32 @@ def _merge_changes_by_shared_runs(
 
     merged.append((cur_o1, cur_o2, cur_exp_text))
     return merged
+
+
+def _contains_whitespace(text: str) -> bool:
+    """True if ``text`` contains any whitespace or the LINE_SEP separator."""
+    return any(c.isspace() or c == LINE_SEP for c in text)
+
+
+def _abbr_is_single_token(orig_text: str) -> bool:
+    """True if ``orig_text`` is a single abbreviation token (TEI-compliant).
+
+    A TEI <abbr> wraps one token, not a run of words.  A cross-line token may
+    legitimately span a LINE_SEP (with layout whitespace around the break), so
+    we split on LINE_SEP and require each segment — stripped of its surrounding
+    layout whitespace — to contain no *internal* whitespace.
+
+    This rejects multi-token <abbr> spans that the upstream diff/merge can
+    produce, e.g. a model that replaces a whole literature reference
+    ("476. col. 2. nu. 1.") with unrelated text: the abbr side would carry
+    internal whitespace and is refused, so no spurious multi-token <choice> is
+    emitted.  Multi-*word* expansions of a single token ("&c" → "et cetera")
+    are unaffected: only the abbr (original) side is checked, never <expan>.
+    """
+    for segment in orig_text.split(LINE_SEP):
+        if any(c.isspace() for c in segment.strip()):
+            return False
+    return True
 
 
 def _find_changes(

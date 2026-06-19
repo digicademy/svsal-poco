@@ -1151,6 +1151,164 @@ class TestCrossLineAbbrWithWhitespaceAroundLb(unittest.TestCase):
         self.assertEqual(g[0].text, "\u017f")
 
 
+class TestSeparateAbbreviationsNotMerged(unittest.TestCase):
+    """
+    Two distinct abbreviations on one line must produce two separate <choice>
+    elements, never a single multi-token <abbr>.
+
+    Regression: _merge_changes_by_shared_runs merged any two changes that
+    shared a tree node.  A <g>'s tail can span from one word into the next
+    ("…itat<g>ẽ</g> fidelium bonor<g>ũ</g>"), making the "…ẽ" element and the
+    " fidelium bonor" tail the same node, so two separate abbreviations were
+    fused into one <choice> whose <abbr> swallowed the unchanged word between
+    them.  The merge is now gated on the gap between changes being
+    whitespace-free (i.e. the same token).
+    """
+
+    NS = f"{{{TEI_NS}}}"
+
+    def _doc(self, body):
+        return (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0"><teiHeader><fileDesc>'
+            '<titleStmt><title>T</title></titleStmt>'
+            '<publicationStmt><p/></publicationStmt>'
+            '<sourceDesc><p/></sourceDesc></fileDesc></teiHeader>'
+            '<text><body><p>' + body + '</p></body></text></TEI>'
+        )
+
+    def _choices(self, result):
+        body = etree.fromstring(result.encode()).find(
+            f"{self.NS}text/{self.NS}body")
+        return body.findall(f".//{self.NS}choice")
+
+    def test_two_abbr_with_unchanged_word_between_stay_separate(self):
+        body = (
+            '<lb xml:id="lb-1"/>quare vniuer<g ref="#char017f">ſ</g>itat'
+            '<g ref="#chare0303">ẽ</g> fidelium bonor<g ref="#charu0303">ũ</g>'
+        )
+
+        def pipeline(rows, pre):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-1"] = "quare vniuerſitatem fidelium bonorum"
+            return exp, {}
+
+        choices = self._choices(process_tei_xml(self._doc(body), pipeline))
+        self.assertEqual(len(choices), 2,
+                         "Two abbreviations must yield two separate <choice>s.")
+        abbrs = ["".join(c.find(f"{self.NS}abbr").itertext()) for c in choices]
+        self.assertEqual(abbrs, ["vniuerſitatẽ", "bonorũ"])
+        for a in abbrs:
+            self.assertNotIn("fidelium", a)
+            self.assertNotIn(" ", a)
+
+    def test_two_adjacent_abbr_stay_separate(self):
+        body = (
+            '<lb xml:id="lb-1"/>foo e<g ref="#chara0303">ã</g> '
+            'n<g ref="#charo0303">õ</g> bar'
+        )
+
+        def pipeline(rows, pre):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-1"] = "foo eam non bar"
+            return exp, {}
+
+        choices = self._choices(process_tei_xml(self._doc(body), pipeline))
+        self.assertEqual(len(choices), 2)
+        abbrs = ["".join(c.find(f"{self.NS}abbr").itertext()) for c in choices]
+        self.assertEqual(abbrs, ["eã", "nõ"])
+
+
+class TestExtractionDoesNotBleedAcrossItems(unittest.TestCase):
+    """
+    A line's extracted plain_text must stop at the next <lb/> in document
+    order, even when items/lists close and reopen between the two lines.
+
+    Regression: _walk_into descended into the subtree holding next_lb and
+    stopped there, but its child loop then continued to the *following*
+    sibling subtree (the next <item>), bleeding that item's text into the
+    current line.
+    """
+
+    def test_line_text_stops_at_item_boundary(self):
+        doc = (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>'
+            '<item><list>'
+            '<item xml:id="it-1"><lb xml:id="lb-a"/>Bonitas creaturarum'
+            '<lb xml:id="lb-b"/>maiorem. pa. 112. n. 1.</item>'
+            '</list></item>'
+            '<item xml:id="it-2"><list type="index">'
+            '<head><lb xml:id="lb-c"/>C</head>'
+            '<item xml:id="it-3"><lb xml:id="lb-d"/>Caelum dicitur. pag. 53.'
+            '<lb xml:id="lb-e"/>circa med.</item>'
+            '</list></item>'
+            '</body></text></TEI>'
+        )
+        tree = etree.ElementTree(etree.fromstring(doc.encode()))
+        lines, _ = extract_lines(tree)
+        by_id = {ln.line_id: ln.plain_text for ln in lines}
+        self.assertNotIn("Caelum", by_id["lb-b"])
+        self.assertNotIn("circa med", by_id["lb-b"])
+        self.assertEqual(by_id["lb-b"].strip(), "maiorem. pa. 112. n. 1.")
+        self.assertEqual(by_id["lb-c"], "C")
+        self.assertIn("Caelum dicitur", by_id["lb-d"])
+
+
+class TestSingleTokenAbbrGuard(unittest.TestCase):
+    """
+    A TEI <abbr> wraps a single token.  A change whose abbr (original) side
+    spans whitespace — e.g. a wholesale-wrong expansion of a literature
+    reference, where source "476. col. 2. nu. 1." is replaced by unrelated
+    multi-word text — must not be emitted as a multi-token <choice>.  Genuine
+    multi-*word* expansions of a single token ("&c" → "et cetera") are kept.
+    """
+
+    NS = f"{{{TEI_NS}}}"
+
+    def _doc(self, body):
+        return (
+            '<TEI xmlns="http://www.tei-c.org/ns/1.0"><teiHeader><fileDesc>'
+            '<titleStmt><title>T</title></titleStmt>'
+            '<publicationStmt><p/></publicationStmt>'
+            '<sourceDesc><p/></sourceDesc></fileDesc></teiHeader>'
+            '<text><body><p>' + body + '</p></body></text></TEI>'
+        )
+
+    def _choices(self, result):
+        body = etree.fromstring(result.encode()).find(
+            f"{self.NS}text/{self.NS}body")
+        return body.findall(f".//{self.NS}choice")
+
+    def test_no_multitoken_abbr_from_wholesale_replacement(self):
+        body = '<lb xml:id="lb-1"/>476. col. 2. nu. 1.'
+
+        def pipeline(rows, pre):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-1"] = "Concilia vniuerſalia quem ordinem habeant"
+            return exp, {}
+
+        choices = self._choices(process_tei_xml(self._doc(body), pipeline))
+        for c in choices:
+            abbr_text = "".join(c.find(f"{self.NS}abbr").itertext())
+            self.assertNotIn(
+                " ", abbr_text,
+                f"No <abbr> may span whitespace; got {abbr_text!r}.")
+
+    def test_multiword_expansion_of_single_token_kept(self):
+        body = '<lb xml:id="lb-1"/>foo <g ref="#char0026">&amp;</g>c bar'
+
+        def pipeline(rows, pre):
+            exp = {r["id"]: r["source_sic"] for r in rows}
+            exp["lb-1"] = "foo et cetera bar"
+            return exp, {}
+
+        choices = self._choices(process_tei_xml(self._doc(body), pipeline))
+        self.assertEqual(len(choices), 1)
+        self.assertEqual(
+            "".join(choices[0].find(f"{self.NS}abbr").itertext()), "&c")
+        self.assertEqual(
+            "".join(choices[0].find(f"{self.NS}expan").itertext()), "et cetera")
+
+
 class TestInsertionDeletionExpansion(unittest.TestCase):
     """
     Regression tests for expansions that diff as insertions/deletions rather
@@ -1197,17 +1355,16 @@ class TestInsertionDeletionExpansion(unittest.TestCase):
     def test_single_line_intra_word_insertion_wraps(self):
         """ſcm → ſanctum (insertions only) must produce a <choice>."""
         result = self._run(
-            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">\u017f</g>cm finit',
-            {"lb-A": "incipit \u017fanctum finit"},
+            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">ſ</g>cm finit',
+            {"lb-A": "incipit ſanctum finit"},
         )
         choices = self._choices(result)
         self.assertEqual(len(choices), 1,
                          "An insertion-shaped expansion must still be wrapped.")
         abbr = choices[0].find(f"{{{TEI_NS}}}abbr")
         expan = choices[0].find(f"{{{TEI_NS}}}expan")
-        self.assertEqual("".join(abbr.itertext()), "\u017fcm")
-        self.assertEqual("".join(expan.itertext()), "\u017fanctum")
-        # The surviving long-s keeps its <g> markup in both branches.
+        self.assertEqual("".join(abbr.itertext()), "ſcm")
+        self.assertEqual("".join(expan.itertext()), "ſanctum")
         self.assertEqual(abbr.find(f"{{{TEI_NS}}}g").get("ref"), "#char017f")
         self.assertEqual(expan.find(f"{{{TEI_NS}}}g").get("ref"), "#char017f")
 
@@ -1218,36 +1375,38 @@ class TestInsertionDeletionExpansion(unittest.TestCase):
         <choice>.
         """
         body = (
-            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">\u017f</g>c\n'
+            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">ſ</g>c\n'
             '<lb xml:id="lb-B"/>m finit'
         )
         result = self._run(
             body,
-            {"lb-A": "incipit \u017fanc\n", "lb-B": "tum finit"},
+            {"lb-A": "incipit ſanc\n", "lb-B": "tum finit"},
             {"lb-A": "lb-B"},
         )
         choices = self._choices(result)
         self.assertEqual(len(choices), 1)
         abbr = choices[0].find(f"{{{TEI_NS}}}abbr")
-        self.assertIsNotNone(abbr.find(f"{{{TEI_NS}}}lb"),
-                             "Cross-line insertion must wrap the <lb/> in <abbr>.")
-        self.assertEqual("".join(abbr.itertext()), "\u017fcm")
+        self.assertIsNotNone(
+            abbr.find(f"{{{TEI_NS}}}lb"),
+            "Cross-line insertion must wrap the <lb/> in <abbr>.",
+        )
+        self.assertEqual("".join(abbr.itertext()), "ſcm")
         self.assertEqual(
             "".join(choices[0].find(f"{{{TEI_NS}}}expan").itertext()),
-            "\u017fanctum")
+            "ſanctum")
 
     def test_within_word_deletion_wraps(self):
         """ſanctum → ſcm (deletions only) must produce a <choice>."""
         result = self._run(
-            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">\u017f</g>anctum finit',
-            {"lb-A": "incipit \u017fcm finit"},
+            '<lb xml:id="lb-A"/>incipit <g ref="#char017f">ſ</g>anctum finit',
+            {"lb-A": "incipit ſcm finit"},
         )
         choices = self._choices(result)
         self.assertEqual(len(choices), 1)
         self.assertEqual(
-            "".join(choices[0].find(f"{{{TEI_NS}}}abbr").itertext()), "\u017fanctum")
+            "".join(choices[0].find(f"{{{TEI_NS}}}abbr").itertext()), "ſanctum")
         self.assertEqual(
-            "".join(choices[0].find(f"{{{TEI_NS}}}expan").itertext()), "\u017fcm")
+            "".join(choices[0].find(f"{{{TEI_NS}}}expan").itertext()), "ſcm")
 
     def test_whole_word_insertion_makes_no_choice(self):
         """
@@ -1291,7 +1450,7 @@ class TestInsertionDeletionExpansion(unittest.TestCase):
         must still be neutralised by the glyph-variant filter — no <choice>.
         """
         result = self._run(
-            '<lb xml:id="lb-A"/>foo ba\u0303r baz',  # 'a' + combining tilde
+            '<lb xml:id="lb-A"/>foo bãr baz',
             {"lb-A": "foo bar baz"},
         )
         self.assertEqual(len(self._choices(result)), 0)
