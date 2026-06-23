@@ -31,6 +31,7 @@ LANG_PREFIX="0"
 TEXT_OUTPUT="text"   # for --mode text: text|jsonl
 PYTHON_BIN="python"
 SAVE_INTERMEDIATE="0"
+RECON_REPORT="0"
 INFER_JSONL=""
 
 usage() {
@@ -70,6 +71,8 @@ Optional:
   --text-output         Only for mode=text; text (default) or jsonl
   --python              Python executable (default: python)
   --script              Path to infer_handler.py
+  --reconstruction-report  xml mode: write <output_stem>.reconstruction.jsonl
+                        audit of U+21AC sentinel repairs
   --save-intermediate   xml mode: save <output_stem>.extracted.jsonl and
                         <output_stem>.inferred.jsonl alongside the output XML.
                         Needed to enable later re-injection-only runs.
@@ -127,6 +130,7 @@ while [[ $# -gt 0 ]]; do
     --python) PYTHON_BIN="${2:-}"; shift 2 ;;
     --script) PY_SCRIPT="${2:-}"; shift 2 ;;
     --save-intermediate) SAVE_INTERMEDIATE="1"; shift 1 ;;
+    --reconstruction-report) RECON_REPORT="1"; shift 1 ;;
     --infer-jsonl) INFER_JSONL="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown argument: $1 (use --help)" ;;
@@ -211,6 +215,9 @@ fi
 
 if [[ "$SAVE_INTERMEDIATE" == "1" ]]; then
   CMD+=(--save-intermediate)
+fi
+if [[ "$RECON_REPORT" == "1" ]]; then
+  CMD+=(--reconstruction-report)
 fi
 
 if [[ -n "$INFER_JSONL" ]]; then

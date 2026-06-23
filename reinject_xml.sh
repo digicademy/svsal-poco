@@ -26,6 +26,7 @@ INPUT=""
 INFER_JSONL=""
 OUTPUT=""
 PYTHON_BIN="python"
+RECON_REPORT=1   # write <output>.reconstruction.jsonl audit (1=on, 0=off)
 
 usage() {
     cat <<'EOF'
@@ -39,6 +40,9 @@ Options:
   --input       -i   Path to the original TEI XML input file
   --infer-jsonl      Path to the *.inferred.jsonl intermediate file
   --output      -o   Path for the re-injected TEI XML output
+  --reconstruction-report     Write <output>.reconstruction.jsonl audit of
+                              U+21AC sentinel repairs (default: on)
+  --no-reconstruction-report  Disable the reconstruction audit
   --python           Python executable to use (default: python)
   --script           Path to infer_handler.py (default: same dir as this script)
   -h, --help         Show this message
@@ -52,6 +56,8 @@ while [[ $# -gt 0 ]]; do
         --input|-i)      INPUT="${2:-}";       shift 2 ;;
         --infer-jsonl)   INFER_JSONL="${2:-}"; shift 2 ;;
         --output|-o)     OUTPUT="${2:-}";      shift 2 ;;
+        --reconstruction-report)    RECON_REPORT=1; shift 1 ;;
+        --no-reconstruction-report) RECON_REPORT=0; shift 1 ;;
         --python)        PYTHON_BIN="${2:-}";  shift 2 ;;
         --script)        PY_SCRIPT="${2:-}";   shift 2 ;;
         -h|--help)       usage; exit 0 ;;
@@ -74,11 +80,18 @@ echo "[reinject_xml] output XML   : $OUTPUT"
 echo "[reinject_xml] no models loaded; CPU only"
 echo
 
-"$PYTHON_BIN" "$PY_SCRIPT" \
-    --mode       xml        \
-    --input-file  "$INPUT"  \
-    --output-file "$OUTPUT" \
+HANDLER_ARGS=(
+    --mode        xml
+    --input-file  "$INPUT"
+    --output-file "$OUTPUT"
     --infer-jsonl "$INFER_JSONL"
+)
+if [[ "$RECON_REPORT" == "1" ]]; then
+    HANDLER_ARGS+=(--reconstruction-report)
+    echo "[reinject_xml] reconstruction audit: ${OUTPUT%.*}.reconstruction.jsonl"
+fi
+
+"$PYTHON_BIN" "$PY_SCRIPT" "${HANDLER_ARGS[@]}"
 
 echo
 echo "[reinject_xml] Done. Output: $OUTPUT"

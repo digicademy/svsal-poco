@@ -23,6 +23,7 @@ LANG_PREFIX="0"
 TEXT_OUTPUT="text"
 PYTHON_BIN="python"
 SAVE_INTERMEDIATE="0"
+RECON_REPORT="0"
 
 # Comma-separated extension overrides (without dots), optional.
 # If omitted, defaults by mode:
@@ -49,7 +50,8 @@ Usage:
     [--python <python_bin>] \
     [--extensions <csv_no_dot>] \
     [--dry-run] \
-    [--save-intermediate]
+    [--save-intermediate] \
+    [--reconstruction-report]
 
 Required:
   --mode
@@ -118,6 +120,7 @@ while [[ $# -gt 0 ]]; do
     --extensions) EXTENSIONS="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN="1"; shift 1 ;;
     --save-intermediate) SAVE_INTERMEDIATE="1"; shift 1 ;;
+    --reconstruction-report) RECON_REPORT="1"; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown argument: $1 (use --help)" ;;
   esac
@@ -256,6 +259,10 @@ for in_file in "${FILES[@]}"; do
 
   if [[ "$SAVE_INTERMEDIATE" == "1" ]]; then
     cmd+=(--save-intermediate)
+  fi
+
+  if [[ "$RECON_REPORT" == "1" ]]; then
+    cmd+=(--reconstruction-report)
   fi
 
   if [[ "$DRY_RUN" == "1" ]]; then
