@@ -261,6 +261,13 @@ which provides a web interface for both plain text and TEI XML input.
   be recognized
 - The model has no explicit language identification; Latin and Spanish
   abbreviations are handled jointly
+- On multi-line (nonbreaking-chain) input the model occasionally leaks its
+  internal line-break sentinel `↬` (U+21AC) into the output, merging a
+  neighbouring line's expansion into the current one (in either direction).
+  The roundtrip pipeline detects and repairs this — keeping the segment that
+  matches each line's own source and redistributing the rest across the chain —
+  and can log every repair to a `*.reconstruction.jsonl` audit file (see the
+  *Reconstruction audit* section in the main README.md)
 
 ## Citation
 

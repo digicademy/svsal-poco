@@ -209,6 +209,59 @@ Notes:
 - `xml` mode: runs TEI/XML roundtripping and writes processed XML.
 - `jsonl` mode: preserves "standard" JSONL pipeline behavior.
 
+**Re-injecting saved inference (fast iteration)**
+
+`xml` mode can skip model loading and GPU inference entirely and re-apply a
+previously saved `*.inferred.jsonl` to the source TEI. This is useful when
+iterating on `tei/tei_roundtrip.py` without re-running the multi-hour GPU job:
+
+```bash
+./reinject_xml.sh \
+  --input    W0100.xml \
+  --inferred W0100.inferred.jsonl \
+  --output   W0100.out.xml
+```
+
+Produce the `*.inferred.jsonl` in the first place by passing `--save-intermediate`
+to a normal `xml` run.
+
+**Expansion post-correction**
+
+When the pipeline wraps an abbreviation in a `<choice>` it:
+
+- keeps trailing/leading word-break punctuation (`. , : ! ? ( ) [ ]`) *outside*
+  the `<choice>` — e.g. `incẽſti,` becomes
+  `<choice><abbr>incẽſti</abbr><expan>incenſti</expan></choice>,` rather than
+  swallowing the comma;
+- merges a token split across an `<lb/>` into a single cross-line `<choice>`
+  even when the abbreviated glyph is the *last* character before the break,
+  replicating the line break with a `@sameAs` attribute in the `<expan>`
+  (e.g. `c<õ>memo` + `<lb/>` + `rem` → `<abbr>cõmemo<lb/>rem</abbr>`
+  / `<expan>commemo<lb sameAs/>rem</expan>`);
+- repairs expansions in which the ByT5 model leaked its line-break sentinel
+  `↬` (U+21AC), redistributing the merged neighbour-line text to the lines of
+  the nonbreaking chain it belongs to (see *Reconstruction audit* below and
+  README-ByT5.md).
+
+**Reconstruction audit**
+
+The sentinel repair can be logged. Pass `--reconstruction-report[=PATH]` to
+`infer_handler.py` (or `--reconstruction-report` to `infer_local.sh` /
+`infer_local_batch.sh`, or set `RECONSTRUCTION_REPORT=1` in `infer_slurm.sh`)
+to write a JSONL sidecar with one record per repaired line:
+
+```json
+{"line_id": "...-lb-1037", "from_line_id": "...-lb-1036", "ratio": 0.917, "kind": "reconstructed"}
+```
+
+`kind` is `sanitized` (the line's own expansion was recovered from the leaked
+segment) or `reconstructed` (text was moved here from the donor line); `ratio`
+is the source/segment similarity used to place it. Without an explicit path the
+file is derived from the output as `<output_stem>.reconstruction.jsonl`, and it
+is emitted automatically when `--save-intermediate` is active. `reinject_xml.sh`
+writes the audit by default; disable it with `--no-reconstruction-report`.
+Clean documents (no sentinel) produce no sidecar.
+
 **Single files**
 
 ```bash

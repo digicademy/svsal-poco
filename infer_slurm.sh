@@ -120,6 +120,10 @@ BATCH_SIZE=32
 # Set to 1 to pass --lang-prefix to the inference handler.
 LANG_PREFIX=0
 
+# Write a <output>.reconstruction.jsonl audit of U+21AC sentinel repairs
+# (line_id, from_line_id, ratio, kind) next to each output XML. 0=off, 1=on.
+RECONSTRUCTION_REPORT=0
+
 # --- Script / package location ----------------------------
 # Directory of the local svsal-poco clone used for pip install.
 # Adjust if you placed the repo somewhere other than $HOME.
@@ -212,6 +216,7 @@ EXTRA_ARGS=()
 [[ "$BOUNDARY_MODEL_TYPE" != "canine" ]] && EXTRA_ARGS+=(--boundary-model-type "$BOUNDARY_MODEL_TYPE")
 [[ -n "$EXTENSIONS" ]]                   && EXTRA_ARGS+=(--extensions "$EXTENSIONS")
 [[ "$LANG_PREFIX" == "1" ]]              && EXTRA_ARGS+=(--lang-prefix)
+[[ "$RECONSTRUCTION_REPORT" == "1" ]]    && EXTRA_ARGS+=(--reconstruction-report)
 
 srun bash "$REPO_DIR/infer_local_batch.sh" \
     --mode          "$MODE" \

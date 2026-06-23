@@ -214,7 +214,20 @@ def run_pipeline_on_rows(rows, output_format, models, batch_size=16,
             os.unlink(output_path)
 
 
-def run_xml(xml_text, models, batch_size=16, save_intermediate_path: str | None = None):
+def _write_reconstruction_report(report: list, path: str | None) -> None:
+    """Write the sentinel-repair audit log: one JSON object per repaired line
+    ({line_id, from_line_id, ratio, kind}). No-op when *path* is falsy or the
+    report is empty, so clean documents leave no stray sidecar."""
+    if not path or not report:
+        return
+    with open(path, "w", encoding="utf-8") as fh:
+        for entry in report:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    print(f"[reconstruction] {len(report)} line(s) repaired \u2192 {path}", file=sys.stderr)
+
+
+def run_xml(xml_text, models, batch_size=16, save_intermediate_path: str | None = None,
+            reconstruction_report_path: str | None = None):
     """Run XML roundtrip inference, optionally persisting intermediate data.
 
     Args:
@@ -288,10 +301,14 @@ def run_xml(xml_text, models, batch_size=16, save_intermediate_path: str | None 
             if os.path.exists(output_path):
                 os.unlink(output_path)
 
-    return process_tei_xml(xml_text, pipeline_fn)
+    report: list = []
+    result = process_tei_xml(xml_text, pipeline_fn, reconstruction_report=report)
+    _write_reconstruction_report(report, reconstruction_report_path)
+    return result
 
 
-def run_xml_from_inferred(xml_text: str, inferred_jsonl: str) -> str:
+def run_xml_from_inferred(xml_text: str, inferred_jsonl: str,
+                          reconstruction_report_path: str | None = None) -> str:
     """Re-injection only: rebuild XML from a pre-saved inference JSONL.
 
     Reads the ``*.inferred.jsonl`` file written by :func:`run_xml` when
@@ -341,7 +358,10 @@ def run_xml_from_inferred(xml_text: str, inferred_jsonl: str) -> str:
             )
         return expanded_dict, boundary_dict
 
-    return process_tei_xml(xml_text, pipeline_fn)
+    report: list = []
+    result = process_tei_xml(xml_text, pipeline_fn, reconstruction_report=report)
+    _write_reconstruction_report(report, reconstruction_report_path)
+    return result
 
 
 def main():
@@ -390,6 +410,20 @@ def main():
             "results from this pre-saved *.inferred.jsonl file. Useful for "
             "iterating on tei_roundtrip.py without re-running the 3.5h GPU job. "
             "When set, --boundary-model-dir / --byt5-model-dir are not needed."
+        ),
+    )
+    parser.add_argument(
+        "--reconstruction-report",
+        metavar="PATH",
+        nargs="?",
+        const="",
+        default=None,
+        help=(
+            "xml mode only: write a JSONL audit of every line whose expansion was "
+            "repaired from a leaked model line-break sentinel (U+21AC). Each row: "
+            "{line_id, from_line_id, ratio, kind}. Given without a value, the path "
+            "is derived from --output-file as <stem>.reconstruction.jsonl. Also "
+            "emitted automatically when --save-intermediate is active."
         ),
     )
 
@@ -461,20 +495,37 @@ def main():
         write_output(out, args.output_file)
 
     elif args.mode == "xml":
+        # Derive intermediate stem when --save-intermediate is present
+        save_stem: str | None = None
+        if args.save_intermediate is not None:
+            if args.save_intermediate:              # explicit path stem provided
+                save_stem = args.save_intermediate
+            elif args.output_file:                  # derive from output path
+                save_stem = str(Path(args.output_file).with_suffix(""))
+            else:                                   # stdout mode: use cwd
+                save_stem = "infer_intermediate"
+
+        # Resolve the reconstruction-audit output path (xml mode only).
+        recon_path: str | None = None
+        if args.reconstruction_report is not None:
+            if args.reconstruction_report:          # explicit path provided
+                recon_path = args.reconstruction_report
+            elif args.output_file:                  # derive from output path
+                recon_path = str(Path(args.output_file).with_suffix("")) + ".reconstruction.jsonl"
+            else:
+                recon_path = "infer_intermediate.reconstruction.jsonl"
+        elif save_stem:                             # parity with other intermediates
+            recon_path = save_stem + ".reconstruction.jsonl"
+
         if reinject_only:
-            out_xml = run_xml_from_inferred(raw, inferred_jsonl=args.infer_jsonl)
+            out_xml = run_xml_from_inferred(
+                raw, inferred_jsonl=args.infer_jsonl,
+                reconstruction_report_path=recon_path,
+            )
         else:
-            # Derive intermediate stem when --save-intermediate is present
-            save_stem: str | None = None
-            if args.save_intermediate is not None:
-                if args.save_intermediate:          # explicit path stem provided
-                    save_stem = args.save_intermediate
-                elif args.output_file:              # derive from output path
-                    save_stem = str(Path(args.output_file).with_suffix(""))
-                else:                               # stdout mode: use cwd
-                    save_stem = "infer_intermediate"
             out_xml = run_xml(raw, models=models, batch_size=args.batch_size,
-                              save_intermediate_path=save_stem)
+                              save_intermediate_path=save_stem,
+                              reconstruction_report_path=recon_path)
         write_output(out_xml, args.output_file)
 
 

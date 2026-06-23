@@ -33,6 +33,7 @@ TEI_NS = "http://www.tei-c.org/ns/1.0"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 NSMAP  = {"tei": TEI_NS, "xml": XML_NS}
 LINE_SEP = "¬"   # U+00AC — nonbreaking line separator in concatenated text
+MODEL_LINE_SEP = "\u21ac"  # U+21AC ↬ — line-break sentinel the expansion model sometimes leaks
 
 # Model identifiers for resp attributes on auto-generated elements.
 # Set these before calling process_tei_xml, or pass model names to it.
@@ -790,12 +791,118 @@ def _inner_text(el: etree._Element) -> str:
 # Applying expansion results back to the XML tree
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Repairing expansions that leaked the model line-break sentinel (U+21AC)
+# ---------------------------------------------------------------------------
+
+# Minimum source/segment similarity for a sentinel-delimited segment to be
+# accepted as a line's expansion. A genuine expansion sits well above this; an
+# unrelated neighbour's text sits well below.
+_SEGMENT_MATCH_THRESHOLD = 0.5
+
+
+def _segment_match(source: str, segment: str) -> float:
+    """Similarity ratio (0..1) between a line's source and a candidate
+    sentinel-delimited expansion segment."""
+    return SequenceMatcher(None, source, segment, autojunk=False).ratio()
+
+
+def _sanitize_expansion(source: str, expanded: str) -> str:
+    """Strip a leaked model line-break sentinel (U+21AC) from one expansion.
+
+    The abbreviation model occasionally merges a neighbouring line's expansion
+    into this line's, separated by U+21AC. The merge direction is inconsistent:
+    the line's own expansion may sit before *or* after the sentinel. Pick
+    whichever sentinel-delimited segment best matches this line's own *source*.
+    If no segment is similar enough, return the source unchanged (leave the line
+    unexpanded) rather than guess.
+    """
+    if MODEL_LINE_SEP not in expanded:
+        return expanded
+    best, best_ratio = None, -1.0
+    for seg in expanded.split(MODEL_LINE_SEP):
+        r = _segment_match(source, seg)
+        if r > best_ratio:
+            best, best_ratio = seg, r
+    if best is None or best_ratio < _SEGMENT_MATCH_THRESHOLD:
+        return source
+    return best
+
+
+def _repair_chain_expansions(
+    chain:                 list,
+    expanded_texts:        dict,
+    line_src:              dict,
+    reconstruction_report: list,
+) -> dict:
+    """Repair sentinel-leaked expansions across one nonbreaking chain.
+
+    No-op unless some line in the chain carries U+21AC, so independent lines are
+    never touched. For each line that leaked, keep the segment matching its own
+    source (recorded as ``sanitized``) and redistribute the remaining segments to
+    the chain lines they actually expand — but only to lines that are still
+    unexpanded (``expanded == source``) and never overwriting a line's own clean
+    expansion (recorded as ``reconstructed``). Each change is appended to
+    ``reconstruction_report`` as ``{line_id, from_line_id, ratio, kind}``.
+
+    Returns a dict of repaired ``{line_id: text}`` to merge into expanded_texts.
+    """
+    donors = [ln for ln in chain
+              if MODEL_LINE_SEP in expanded_texts.get(ln.line_id, "")]
+    if not donors:
+        return {}
+
+    repaired: dict = {}
+    for ln in donors:
+        lid = ln.line_id
+        src = line_src.get(lid, ln.plain_text)
+        segments = expanded_texts[lid].split(MODEL_LINE_SEP)
+
+        # This line keeps the segment that best matches its own source.
+        own, own_ratio, own_idx = None, -1.0, -1
+        for i, seg in enumerate(segments):
+            r = _segment_match(src, seg)
+            if r > own_ratio:
+                own, own_ratio, own_idx = seg, r, i
+        if own is not None and own_ratio >= _SEGMENT_MATCH_THRESHOLD:
+            repaired[lid] = own
+            reconstruction_report.append(
+                {"line_id": lid, "from_line_id": lid,
+                 "ratio": round(own_ratio, 3), "kind": "sanitized"})
+        else:
+            repaired[lid] = src  # nothing matched: leave unexpanded
+
+        # Redistribute the other segments to the chain lines they expand.
+        for i, seg in enumerate(segments):
+            if i == own_idx:
+                continue
+            best_ln, best_ratio = None, -1.0
+            for other in chain:
+                oid = other.line_id
+                if oid == lid:
+                    continue
+                osrc = line_src.get(oid, other.plain_text)
+                cur = repaired.get(oid, expanded_texts.get(oid, ""))
+                if cur.strip() != osrc.strip():
+                    continue  # line already carries its own clean expansion
+                r = _segment_match(osrc, seg)
+                if r > best_ratio:
+                    best_ln, best_ratio = other, r
+            if best_ln is not None and best_ratio >= _SEGMENT_MATCH_THRESHOLD:
+                repaired[best_ln.line_id] = seg
+                reconstruction_report.append(
+                    {"line_id": best_ln.line_id, "from_line_id": lid,
+                     "ratio": round(best_ratio, 3), "kind": "reconstructed"})
+    return repaired
+
+
 def apply_expansions(
     tree:                 etree._ElementTree,
     lines:                list[ExtractedLine],
     expanded_texts:       dict[str, str],     # line_id → expanded plain text
     boundary_predictions: dict[str, str],     # line_id → next_line_id (nonbreaking)
     pre_annotated:        dict[str, str] | None = None,  # boundaries already in source XML
+    reconstruction_report: Optional[list] = None,  # audit log for U+21AC repair
 ) -> etree._ElementTree:
     """
     Apply abbreviation expansions and boundary predictions back to the XML tree.
@@ -810,6 +917,10 @@ def apply_expansions(
     Returns the modified tree (modified in-place).
     """
     pre_annotated = pre_annotated or {}
+    expanded_texts = dict(expanded_texts)  # don't mutate the caller's dict
+    if reconstruction_report is None:
+        reconstruction_report = []
+    line_src = {line.line_id: line.plain_text for line in lines}
 
     # --- Apply boundary predictions ---
     line_by_id = {line.line_id: line for line in lines}
@@ -826,6 +937,13 @@ def apply_expansions(
 
     # --- Build nonbreaking chains ---
     chains = _build_line_chains(lines, boundary_predictions)
+
+    # --- Repair sentinel-leaked expansions (no-op on clean chains) ---
+    for chain in chains:
+        repaired = _repair_chain_expansions(
+            chain, expanded_texts, line_src, reconstruction_report,
+        )
+        expanded_texts.update(repaired)
 
     # --- Apply expansions per chain ---
     for chain in chains:
@@ -950,9 +1068,14 @@ def _merge_sep_adjacent_changes(
         l2_content_start = _content_start_after(orig_concat, sep_pos + len(LINE_SEP))
 
         # Change whose right edge is at L1's content boundary (last word).
+        # Use the content-trimmed end so a change that reaches the separator
+        # *through* L1's trailing pretty-print whitespace (which happens when
+        # the changed glyph is the last character before the <lb/>, e.g.
+        # ornam⟨ẽ⟩[lb]ta) is still recognised as ending at L1's last word.
         l1_idx = next(
             (i for i, (o1, o2, e1, e2) in enumerate(result)
-             if i not in removed and o2 == l1_content_end),
+             if i not in removed
+             and _content_end_before(orig_concat, o2) == l1_content_end),
             None,
         )
         # Change whose left edge starts at L2's content boundary (first word).
@@ -996,7 +1119,48 @@ def _merge_sep_adjacent_changes(
 
             if o_word_start < l1_content_end:
                 result[l2_idx] = (o_word_start, l2_o2, e_word_start, l2_e2)
-        # If only L1 exists, leave it as a single-line change (correct as-is).
+
+        elif l1_idx is not None:
+            # Only the L1 part changed (e.g. c⟨õ⟩memo[lb]rem, ornam⟨ẽ⟩[lb]ta):
+            # the changed glyph sits at the end of L1's last word, flush to the
+            # boundary, and L2 begins with the plain continuation of the same
+            # token.  Extend the change RIGHTWARD to include L2's first word so
+            # _apply_cross_line_choice wraps the whole cross-line token (with an
+            # <lb sameAs> replicated in the <expan>).
+            #
+            # Guard: only do this when L2's first word is a *pure continuation* —
+            # byte-identical in orig_concat and exp_concat.  If L2's first word
+            # differs (it is itself a glyph variant such as cleſia→clesia, which
+            # the glyph filter has already removed from `changes`), it is a
+            # separate token and must stay OUT of the cross-line choice, leaving
+            # L1 as a single-line <choice>.
+            l1_o1, l1_o2, l1_e1, l1_e2 = result[l1_idx]
+
+            # End of L2's first word in orig_concat.
+            o_word_end = l2_content_start
+            while (o_word_end < len(orig_concat)
+                   and not orig_concat[o_word_end].isspace()
+                   and orig_concat[o_word_end] != LINE_SEP):
+                o_word_end += 1
+
+            # Start/end of L2's first word in exp_concat (L1 expansions shift
+            # absolute positions, so recompute from the exp-side separator).
+            exp_l2_content_start = _content_start_after(
+                exp_concat, exp_sep_pos + len(LINE_SEP))
+            e_word_end = exp_l2_content_start
+            while (e_word_end < len(exp_concat)
+                   and not exp_concat[e_word_end].isspace()
+                   and exp_concat[e_word_end] != LINE_SEP):
+                e_word_end += 1
+
+            orig_l2_word = orig_concat[l2_content_start:o_word_end]
+            exp_l2_word = exp_concat[exp_l2_content_start:e_word_end]
+
+            if (o_word_end > l2_content_start
+                    and orig_l2_word
+                    and orig_l2_word == exp_l2_word):
+                result[l1_idx] = (l1_o1, o_word_end, l1_e1, e_word_end)
+        # Otherwise (no boundary-adjacent change) leave changes untouched.
 
     return [c for i, c in enumerate(result) if i not in removed]
 
@@ -1892,6 +2056,11 @@ def _find_changes(
         # Expand in expanded — use the same word context
         oj1 = _expand_left(expanded, j1)
         oj2 = _expand_right(expanded, j2)
+        # Keep edge word-break punctuation OUTSIDE the token when it is not part
+        # of the actual change, so a trailing comma/period/colon (or a leading
+        # bracket) pulled in by word-boundary expansion stays outside <choice>.
+        oi1, oi2 = _trim_edge_punct(original, oi1, oi2, i1, i2)
+        oj1, oj2 = _trim_edge_punct(expanded, oj1, oj2, j1, j2)
         # A pure insertion or deletion that sits between words (flanked by
         # whitespace/LINE_SEP) expands to an empty range on one side and cannot
         # be represented as <choice><abbr>…</abbr><expan>…</expan></choice> —
@@ -1939,6 +2108,28 @@ def _expand_right(text: str, pos: int) -> int:
     while pos < len(text) and not text[pos].isspace() and text[pos] != LINE_SEP:
         pos += 1
     return pos
+
+
+def _trim_edge_punct(
+    text: str, start: int, end: int, chg_start: int, chg_end: int,
+) -> tuple[int, int]:
+    """Pull word-break punctuation back OUT of a word-boundary-expanded range
+    when it is not part of the actual change.
+
+    ``_expand_left``/``_expand_right`` stop only at whitespace/LINE_SEP, so a
+    change that ends one character before a trailing comma/period/colon (or
+    begins one after a leading bracket) drags that identical edge punctuation
+    into the token, putting it inside the generated ``<choice>``. Here we trim
+    leading/trailing characters in :data:`WORD_BREAK_PUNCT`, but never past the
+    raw change boundaries (``chg_start``/``chg_end``) — so punctuation that is
+    genuinely produced or removed by the expansion (e.g. ``&c`` → ``etc.``)
+    stays inside the token.
+    """
+    while end > chg_end and end > start and text[end - 1] in WORD_BREAK_PUNCT:
+        end -= 1
+    while start < chg_start and start < end and text[start] in WORD_BREAK_PUNCT:
+        start += 1
+    return start, end
 
 
 def _merge_changes(
@@ -2168,10 +2359,16 @@ def _apply_change_preserving_markup(
             insert_after = None  # insert as first child
 
     # --- Capture tail text that survives after </choice> ---
+    # Read from the *current* node, not the cached run snapshot: when two
+    # separate changes share a tree node (e.g. a <g>'s tail that runs from one
+    # token across whitespace into the next, "…t<g>ã</g>tes … N<g>õ</g>"), an
+    # earlier right-to-left change has already truncated that node. Using the
+    # stale run.text here would re-introduce the suffix it removed, duplicating
+    # a character before this <choice>. For an unmodified node these are equal.
     local_end_in_last = orig_end - last_run.plain_start
 
     if last_run.is_tail:
-        after_text = last_run.text[local_end_in_last:]
+        after_text = (last_run.node.tail or "")[local_end_in_last:]
     elif _is_intoken_element(last_run.node):
         # the in-token element (e.g. <g>) is moved into <abbr> and removed;
         # what survives after </choice> is that element's tail
@@ -2180,7 +2377,7 @@ def _apply_change_preserving_markup(
         # the token lived in a wrapper/block .text (e.g. <hi>) which we keep in
         # place: the surviving text is the remainder of that same text node,
         # which becomes the choice's tail inside the preserved wrapper
-        after_text = last_run.text[local_end_in_last:]
+        after_text = (last_run.node.text or "")[local_end_in_last:]
 
     # --- Tree surgery ---
 
@@ -2436,6 +2633,7 @@ def process_tei_xml(
     run_pipeline_fn,  # callable: (lines_jsonl, pre_annotated) → (expanded_dict, boundary_dict)
     expansion_model:  Optional[str] = None,
     boundary_model:   Optional[str] = None,
+    reconstruction_report: Optional[list] = None,
 ) -> str:
     """
     Full roundtrip: TEI XML string → expand abbreviations → TEI XML string.
@@ -2490,7 +2688,10 @@ def process_tei_xml(
     )
 
     # Apply results
-    apply_expansions(tree, lines, expanded_dict, boundary_dict, pre_annotated)
+    apply_expansions(
+        tree, lines, expanded_dict, boundary_dict, pre_annotated,
+        reconstruction_report=reconstruction_report,
+    )
 
     # Declare the applications referenced by the @resp pointers (the "#auto"
     # pipeline marker and the model ids) in teiHeader/encodingDesc/appInfo.
