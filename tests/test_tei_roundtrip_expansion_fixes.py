@@ -295,5 +295,107 @@ class TestSentinelReconstruction(unittest.TestCase):
         self.assertNotIn(SENT, out)
 
 
+class TestHiWrapperStraddle(unittest.TestCase):
+    """Issue I — a token that STARTS inside an <hi>-rendered initial and
+    straddles past </hi> into following siblings. The nest-inside-wrapper
+    strategy (valid only for fully-contained tokens) duplicated the wrapper's
+    tail after </hi>. The straddle must instead build a clean <choice> at the
+    wrapper's position, cloning the rendered initial into <abbr> (it is dropped
+    only from <expan>), with the abbr reading byte-identical to the source.
+    A fully-CONTAINED wrapper token must still nest <choice> inside <hi>."""
+
+    def _abbr_reading(self, xml):
+        root = etree.fromstring(xml.encode("utf-8"))
+        for expan in root.findall(f".//{{{TEI_NS}}}expan"):
+            expan.getparent().remove(expan)
+        body = root.find(f".//{{{TEI_NS}}}body")
+        return re.sub(r"\s+", " ", "".join(body.itertext())).strip()
+
+    def _plain(self, body):
+        root = etree.fromstring(_doc(body).encode("utf-8"))
+        b = root.find(f".//{{{TEI_NS}}}body")
+        return re.sub(r"\s+", " ", "".join(b.itertext())).strip()
+
+    def test_straddle_drops_hi_no_duplication(self):
+        body = (
+            f'<lb xml:id="L2002"/><hi rendition="#initCaps">L</hi>'
+            f'Ateran{ET}{SF}is eccle{SF}i{AE} dignitas, o{SF}t{ET}'
+            f'<lb xml:id="L2003"/>ditur. pag. 229. col. 1. nu. 4.'
+        )
+        out = _run(body,
+                   {"L2002": "LAteranenſis eccleſiæ dignitas, oſten",
+                    "L2003": "ditur. pag. 229. col. 1. nu. 4."},
+                   {"L2002": "L2003"})
+        # abbr side must round-trip to the original (no "Ateran" echo); compare
+        # whitespace-insensitively since a break="no" lb rejoins split words.
+        self.assertEqual(self._abbr_reading(out).replace(" ", ""),
+                         self._plain(body).replace(" ", ""))
+        # the rendered initial is PRESERVED inside <abbr>, dropped only in <expan>
+        abbr_xml = re.search(r'<abbr>(.*?)</abbr>', out, re.S).group(1)
+        expan_xml = re.search(r'<expan[^>]*>(.*?)</expan>', out, re.S).group(1)
+        self.assertIn('<hi rendition="#initCaps">L</hi>Ateran', abbr_xml)
+        self.assertNotIn("<hi", expan_xml)
+        abbr, expan = _abbr_expan(out)
+        self.assertEqual(abbr, "LAteranẽſis")
+        self.assertEqual(expan, "LAteranenſis")
+
+    def test_contained_wrapper_still_nests(self):
+        body = f'<lb xml:id="L"/>uir <hi rendition="#initCaps">c{OT}</hi> ait'
+        out = _run(body, {"L": "uir con ait"})
+        # choice nests INSIDE the wrapper, which is preserved
+        self.assertIn('<hi rendition="#initCaps"><choice', out)
+        self.assertIn("</choice></hi>", out)
+        self.assertEqual(self._abbr_reading(out).replace(" ", ""),
+                         self._plain(body).replace(" ", ""))
+
+
+class TestRunawayExpansionOverrun(unittest.TestCase):
+    """Issue II — the model occasionally over-runs a line, emitting the NEXT
+    line's text as part of this line's expansion with no U+21AC sentinel. The
+    cross-line merge would otherwise swallow that runaway clause into the
+    <expan> and split the following tail. Such a token must be left UNEXPANDED.
+    A genuine cross-line abbreviation must still expand."""
+
+    OG = '<g ref="#charo0300">ò</g>'   # ò
+    EG = '<g ref="#chare0328">ę</g>'   # ę
+
+    def _abbr_reading(self, xml):
+        root = etree.fromstring(xml.encode("utf-8"))
+        for expan in root.findall(f".//{{{TEI_NS}}}expan"):
+            expan.getparent().remove(expan)
+        body = root.find(f".//{{{TEI_NS}}}body")
+        return re.sub(r"\s+", " ", "".join(body.itertext())).strip()
+
+    def _plain(self, body):
+        root = etree.fromstring(_doc(body).encode("utf-8"))
+        b = root.find(f".//{{{TEI_NS}}}body")
+        return re.sub(r"\s+", " ", "".join(b.itertext())).strip()
+
+    def test_runaway_overrun_leaves_token_unexpanded(self):
+        body = _chain_body([
+            ("L1040", f'Iuri{SF}dictionis pote{SF}tas, etiam in foro c{OT}{SF}cien'),
+            ("L1041", f'ti{AE}, qu{self.OG}d omnibus {SF}acerdotibus {self.EG}qualiter'),
+            ("L1042", 'non conueniat. ibid. nu. 6.'),
+        ])
+        out = _run(body,
+                   {"L1040": ("Iuriſdictionis poteſtas, etiam in foro "
+                              "conſcienſiæ, quòd omnibus ſacerdotibus ęqualiter"),
+                    "L1041": "tiæ, quòd omnibus ſacerdotibus ęqualiter",
+                    "L1042": "non conueniat. ibid. nu. 6."},
+                   {"L1040": "L1041"})
+        # runaway → no <choice> at all; source characters fully intact (the
+        # boundary classifier may set break="no", which only drops whitespace).
+        self.assertEqual(len(_choices(out)), 0)
+        self.assertEqual(self._abbr_reading(out).replace(" ", ""),
+                         self._plain(body).replace(" ", ""))
+
+    def test_genuine_cross_line_still_expands(self):
+        body = _chain_body([("A", f'Quid c{OT}memo'), ("B", "rem ait")])
+        out = _run(body, {"A": "Quid commemo", "B": "rem ait"}, {"A": "B"})
+        abbr, expan = _abbr_expan(out)
+        self.assertEqual(abbr, "cõmemorem")
+        self.assertEqual(expan, "commemorem")
+
+
 if __name__ == "__main__":
     unittest.main()

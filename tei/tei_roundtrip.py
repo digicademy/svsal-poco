@@ -1085,6 +1085,20 @@ def _merge_sep_adjacent_changes(
             None,
         )
 
+        # Runaway-overrun guard: when an L1-boundary change exists, its
+        # expansion must reach the line boundary.  If the model emitted extra
+        # clause text between that expansion and the separator (a line overrun
+        # with no U+21AC sentinel), merging would swallow the runaway into the
+        # cross-line <expan> and split the following tail.  Detect a non-empty,
+        # non-whitespace gap and drop the L1 change so the token is left
+        # unexpanded — the only safe outcome for unrecoverable model garbage.
+        if l1_idx is not None:
+            _l1o1, _l1o2, _l1e1, _l1e2 = result[l1_idx]
+            exp_l1_content_end = _content_end_before(exp_concat, exp_sep_pos)
+            if exp_concat[_l1e2:exp_l1_content_end].strip():
+                removed.add(l1_idx)
+                continue
+
         if l1_idx is not None and l2_idx is not None:
             # Both halves differ from the model — merge into one cross-line
             # change whose range includes the LINE_SEP.
@@ -1165,6 +1179,27 @@ def _merge_sep_adjacent_changes(
     return [c for i, c in enumerate(result) if i not in removed]
 
 
+def _is_line_runaway(source: str, expanded: str) -> bool:
+    """True if a line's expansion gained enough whole words to indicate a line
+    overrun rather than a genuine in-place abbreviation expansion.
+
+    Abbreviation expansion edits letters *within* tokens (tilde→m/n, ſ→s, …)
+    and only rarely turns one token into two ("&c" → "et cetera"), so the word
+    count is essentially preserved.  When the model runs past the end of a line
+    — emitting the neighbouring line's text with no U+21AC sentinel — the
+    expansion gains several whole words.  This is detected on the raw
+    source/expanded pair, before any diffing, so it is immune to the
+    diff-alignment quirks (e.g. a trailing layout newline on the source side
+    only) that let an overrun slip past the token- and merge-level guards.
+
+    The threshold (≥2 added words) leaves single multi-word expansions like
+    "&c" → "et cetera" untouched while catching real overruns, which duplicate
+    a line's worth of text.  A false positive merely leaves the line
+    unexpanded — the safe outcome for an unrecoverable expansion.
+    """
+    return len(expanded.split()) - len(source.split()) >= 2
+
+
 def _apply_chain_expansion(
     chain:          list[ExtractedLine],
     expanded_texts: dict[str, str],
@@ -1179,7 +1214,14 @@ def _apply_chain_expansion(
     """
     # Concatenate originals and expanded with LINE_SEP
     orig_parts = [line.plain_text for line in chain]
-    exp_parts = [expanded_texts.get(line.line_id, line.plain_text) for line in chain]
+    exp_parts = []
+    for line in chain:
+        exp = expanded_texts.get(line.line_id, line.plain_text)
+        # Drop a runaway line-overrun expansion back to its source so it is left
+        # unexpanded instead of leaking the neighbour's text into a <choice>.
+        if _is_line_runaway(line.plain_text, exp):
+            exp = line.plain_text
+        exp_parts.append(exp)
 
     orig_concat = LINE_SEP.join(orig_parts)
     exp_concat = LINE_SEP.join(exp_parts)
@@ -1872,6 +1914,9 @@ def _apply_line_expansion(
     and wrapping changes in <choice><abbr>...<expan>...</choice>.
     """
     original = line.plain_text
+    # Leave a runaway line-overrun expansion unexpanded (see _is_line_runaway).
+    if _is_line_runaway(original, expanded):
+        return
     changes = _find_changes(original, expanded)
     changes_with_exp_text = _merge_changes_by_shared_runs(
         changes, line.text_runs, original, expanded,
@@ -2067,6 +2112,16 @@ def _find_changes(
         # both branches need a non-empty token — so skip it.  In-token
         # insertions/deletions expand to the full word on both sides.
         if oi1 >= oi2 or oj1 >= oj2:
+            continue
+        # Runaway-expansion guard: a single source token must not expand into a
+        # multi-word clause. The model occasionally over-runs a line, emitting
+        # the *next* line's text as part of this token's expansion (a line
+        # overrun without the U+21AC sentinel). That cannot be a legitimate
+        # single-token abbreviation, so drop the change and leave the token
+        # unexpanded rather than wrap a whole clause in one <choice>. Genuine
+        # short multi-word expansions ("&c" -> "et cetera") stay under the bar.
+        if (not _contains_word_break(original[oi1:oi2])
+                and len(expanded[oj1:oj2].split()) >= 3):
             continue
         changes.append((oi1, oi2, oj1, oj2))
 
@@ -2273,6 +2328,16 @@ def _texts_equivalent(a: str, b: str) -> bool:
     return True
 
 
+def _node_within(node: etree._Element, ancestor: etree._Element) -> bool:
+    """True if ``node`` is ``ancestor`` itself or a descendant of it."""
+    cur = node
+    while cur is not None:
+        if cur is ancestor:
+            return True
+        cur = cur.getparent()
+    return False
+
+
 def _apply_change_preserving_markup(
     line:       ExtractedLine,
     orig_start: int,
@@ -2305,6 +2370,33 @@ def _apply_change_preserving_markup(
     first_run = affected_runs[0]
     last_run = affected_runs[-1]
 
+    # --- Detect a token that STRADDLES a non-intoken wrapper boundary ---
+    # The normal strategy for a wrapper (<hi>, <foreign>, …) is to nest <choice>
+    # *inside* it (<hi><choice>…</choice></hi>), which is only valid when the
+    # token is fully contained in the wrapper. When the token merely *starts*
+    # inside the wrapper (e.g. an <hi>-rendered initial "L") and continues past
+    # </hi> into the wrapper's tail and following siblings, nesting would clone
+    # the out-of-wrapper text into <abbr> while leaving the originals in place,
+    # duplicating that text after </hi>. In that case we place <choice> at the
+    # wrapper's position in the parent and remove the *original* wrapper, while
+    # cloning the rendered initial into <abbr> (<abbr><hi>L</hi>Ateran…</abbr>);
+    # it is dropped only from <expan>, which is plain text.
+    wrapper = first_run.node
+    wrapper_straddle = (
+        not first_run.is_tail
+        and not _is_intoken_element(wrapper)
+        and any(
+            (r.is_tail and r.node is wrapper) or not _node_within(r.node, wrapper)
+            for r in affected_runs
+        )
+    )
+    if wrapper_straddle:
+        # Only safe when the token starts at the wrapper's text start (no
+        # surviving text before it inside the wrapper). Otherwise leave the
+        # token unexpanded rather than risk corrupting the markup.
+        if first_run.text[: orig_start - first_run.plain_start]:
+            return None
+
     # --- Build <choice> element ---
     choice = etree.Element(_tag("choice"))
     choice.set("resp", _expansion_resp())
@@ -2323,8 +2415,15 @@ def _apply_change_preserving_markup(
         if not text_portion:
             continue
 
-        if not run.is_tail and _is_intoken_element(run.node):
-            # Clone the inline element into <abbr>
+        if not run.is_tail and (
+            _is_intoken_element(run.node)
+            or (wrapper_straddle and run.node is wrapper)
+        ):
+            # Clone the inline element into <abbr>.  In-token glyphs (<g>) always
+            # move in; for a straddled wrapper (<hi> …), its text element is
+            # cloned too so the rendered initial is preserved in <abbr> — e.g.
+            # <abbr><hi>L</hi>Ateranẽſis</abbr>.  The wrapper is dropped only
+            # from <expan>, which is emitted as plain text below.
             cloned = copy.deepcopy(run.node)
             cloned.text = text_portion
             cloned.tail = None
@@ -2347,7 +2446,13 @@ def _apply_change_preserving_markup(
     )
 
     # --- Determine insertion point ---
-    if first_run.is_tail:
+    if wrapper_straddle:
+        # Place <choice> at the wrapper's position in the parent; the wrapper
+        # element itself is removed after insertion (its text and consumed tail
+        # are now inside <abbr>).
+        insert_parent = wrapper.getparent()
+        insert_after = wrapper
+    elif first_run.is_tail:
         insert_parent = first_run.node.getparent()
         insert_after = first_run.node
     else:
@@ -2431,6 +2536,13 @@ def _apply_change_preserving_markup(
         idx = 0
 
     insert_parent.insert(idx, choice)
+
+    if wrapper_straddle and wrapper.getparent() is insert_parent:
+        # The wrapper's text and consumed tail are now inside <abbr>; drop the
+        # now-redundant wrapper element (its tail was fully consumed, or its
+        # surviving remainder was captured into choice.tail above).
+        wrapper.tail = None
+        insert_parent.remove(wrapper)
 
     return choice
 

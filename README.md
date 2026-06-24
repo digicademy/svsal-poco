@@ -241,7 +241,20 @@ When the pipeline wraps an abbreviation in a `<choice>` it:
 - repairs expansions in which the ByT5 model leaked its line-break sentinel
   `↬` (U+21AC), redistributing the merged neighbour-line text to the lines of
   the nonbreaking chain it belongs to (see *Reconstruction audit* below and
-  README-ByT5.md).
+  README-ByT5.md);
+- handles an abbreviation token that *straddles* an `<hi>`-style wrapper — one
+  that starts inside the wrapper (e.g. an `#initCaps` initial) but continues
+  past `</hi>` — by building one clean `<choice>` at the wrapper's position and
+  cloning the rendered initial into `<abbr>` (e.g.
+  `<abbr><hi>L</hi>Ateranẽſis</abbr>`), dropping it only from `<expan>`. This
+  replaces the invalid nesting of `<choice>` inside the wrapper (which is
+  reserved for fully-contained tokens such as `<hi>dño</hi>`) that previously
+  duplicated the wrapper's tail after it;
+- leaves a line *unexpanded* when the model's expansion is a runaway line
+  overrun — it gains two or more whole words over the source, i.e. the model
+  ran past the line end and emitted the neighbouring line's text without the
+  `↬` sentinel. Wrapping such output would leak a whole clause into the
+  `<expan>` and split the following tail, so the abbreviation is left as-is.
 
 **Reconstruction audit**
 
