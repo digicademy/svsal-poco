@@ -256,6 +256,12 @@ When the pipeline wraps an abbreviation in a `<choice>` it:
   `↬` sentinel. Wrapping such output would leak a whole clause into the
   `<expan>` and split the following tail, so the abbreviation is left as-is.
 
+XML processing instructions (e.g. `<?xml-model?>`, `<?oxygen?>`) and comments
+are ignored as document content (only the text *following* them is line text)
+and are preserved untouched in the output. Earlier they were mistaken for inline
+elements, so their bodies leaked into the plain text and could crash a `<choice>`
+insertion.
+
 **Reconstruction audit**
 
 The sentinel repair can be logged. Pass `--reconstruction-report[=PATH]` to
