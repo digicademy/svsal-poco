@@ -364,12 +364,15 @@ def _collect_note_initial_text(
             _collect_note_initial_text_recursive(child, first_lb, text_runs)
             return
 
-        # Collect all text from this child
-        for text in child.itertext():
-            if text:
-                text_runs.append(TextRun(
-                    text=text, node=child, is_tail=False,
-                ))
+        # Collect all text from this child (comments / processing instructions
+        # carry no document text and cannot be walked with itertext(); keep
+        # only their tail).
+        if isinstance(child.tag, str):
+            for text in child.itertext():
+                if text:
+                    text_runs.append(TextRun(
+                        text=text, node=child, is_tail=False,
+                    ))
         if child.tail:
             text_runs.append(TextRun(
                 text=child.tail, node=child, is_tail=True,
@@ -392,11 +395,12 @@ def _collect_note_initial_text_recursive(
         if _is_descendant_of(first_lb, child):
             _collect_note_initial_text_recursive(child, first_lb, text_runs)
             return
-        for text in child.itertext():
-            if text:
-                text_runs.append(TextRun(
-                    text=text, node=child, is_tail=False,
-                ))
+        if isinstance(child.tag, str):
+            for text in child.itertext():
+                if text:
+                    text_runs.append(TextRun(
+                        text=text, node=child, is_tail=False,
+                    ))
         if child.tail:
             text_runs.append(TextRun(
                 text=child.tail, node=child, is_tail=True,
@@ -693,6 +697,19 @@ def _walk_into(
     """
     tag = el.tag
 
+    # Comments and processing instructions (<!-- … -->, <?oxygen …?>,
+    # <?xml-model …?>) are not document content: lxml gives them a callable
+    # .tag and a .text that is the PI/comment body, which must never enter the
+    # plain text or anchor a run (a later <choice> insertion would try to add a
+    # child to a node that cannot hold one).  Only their .tail — running text
+    # that follows the node — belongs to the line.
+    if not isinstance(tag, str):
+        if el.tail:
+            text_runs.append(TextRun(
+                text=el.tail, node=el, is_tail=True,
+            ))
+        return
+
     # --- Note handling ---
     if tag == _tag("note") and not is_in_note:
         # Record the note's position and skip its content
@@ -784,6 +801,9 @@ def _walk_into(
 
 def _inner_text(el: etree._Element) -> str:
     """Get all text content of an element (like XPath string())."""
+    if not isinstance(el.tag, str):
+        # Comments / processing instructions carry no document text.
+        return ""
     return "".join(el.itertext())
 
 
@@ -1887,7 +1907,10 @@ def _insert_choice_at_line_end(
     # Find the last text run before/at the cut point
     for run in reversed(line.text_runs):
         if run.plain_start < at_offset:
-            if run.is_tail:
+            if run.is_tail or not isinstance(run.node.tag, str):
+                # Tail text, or a comment/processing instruction that cannot
+                # hold children: insert the <choice> as a sibling right after
+                # the anchor node rather than inside it.
                 parent = run.node.getparent()
                 if parent is None:
                     continue

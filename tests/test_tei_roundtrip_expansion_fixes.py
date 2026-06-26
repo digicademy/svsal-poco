@@ -29,6 +29,9 @@ from tei.tei_roundtrip import (
     process_tei_xml,
     _sanitize_expansion,
     _make_tag_fn,
+    _insert_choice_at_line_end,
+    ExtractedLine,
+    TextRun,
     TEI_NS,
     MODEL_LINE_SEP,
 )
@@ -395,6 +398,67 @@ class TestRunawayExpansionOverrun(unittest.TestCase):
         abbr, expan = _abbr_expan(out)
         self.assertEqual(abbr, "cõmemorem")
         self.assertEqual(expan, "commemorem")
+
+
+class TestProcessingInstructionsAndComments(unittest.TestCase):
+    """Crashes on real TEI (W0549/W0552/W0573): XML processing instructions
+    (<?oxygen?>, <?xml-model?>) and comments carry a callable .tag and a .text
+    that is the PI/comment body. The builder treated them as inline elements,
+    so their pseudo-text entered the plain text and anchored a run, which then
+    crashed when a <choice> insertion tried to add a child to a node that
+    cannot hold one (TypeError / ValueError on itertext). They must be ignored
+    as content (only their tail is document text) and preserved in the tree."""
+
+    def _plain(self, xml):
+        root = etree.fromstring(xml.encode("utf-8"))
+        b = root.find(f".//{{{TEI_NS}}}body")
+        return re.sub(r"\s+", " ", "".join(b.itertext())).strip()
+
+    def test_pi_in_cross_line_chain_no_crash(self):
+        body = (f'<lb xml:id="A"/>foo <?oxygen RNGSchema="x"?>c{OT}memo\n'
+                f'<lb xml:id="B"/>rem bar')
+        out = _run(body, {"A": "foo commemo", "B": "rem bar"}, {"A": "B"})
+        abbr, expan = _abbr_expan(out)
+        self.assertEqual((abbr, expan), ("cõmemorem", "commemorem"))
+        self.assertIn("<?oxygen", out)                 # PI preserved
+        self.assertNotIn("RNGSchema", self._plain(out))  # body not in plain text
+
+    def test_comment_in_line_no_crash(self):
+        body = f'<lb xml:id="A"/>foo <!-- editorial -->c{OT}tra dicit'
+        out = _run(body, {"A": "foo contra dicit"})
+        self.assertIn("<!-- editorial -->", out)
+        self.assertNotIn("editorial", self._plain(out))
+        abbr, expan = _abbr_expan(out)
+        self.assertEqual((abbr, expan), ("cõtra", "contra"))
+
+    def test_pi_inside_note_no_crash(self):
+        body = (f'<lb xml:id="L1"/>main text'
+                f'<note place="margin"><?oxygen S="y"?>note st{OT}rt'
+                f'<lb xml:id="N1"/>cont</note> tail\n<lb xml:id="L2"/>more')
+        out = _run(body, {"L1": "main text", "N1": "cont",
+                          "L2": "more", "note-N1-init": "note start"})
+        # no crash, and the note's PI survives intact
+        self.assertIn('<?oxygen S="y"?>', out)
+
+    def test_insert_choice_at_line_end_pi_anchor_inserts_sibling(self):
+        # Directly exercise the crash line: the last run before the cut is a
+        # non-tail run anchored on a processing instruction. The <choice> must
+        # be inserted as a sibling, not as a child of the PI.
+        import tei.tei_roundtrip as trt
+        p = etree.fromstring(
+            '<p xmlns="http://www.tei-c.org/ns/1.0">'
+            '<lb xml:id="A"/>ab<?pi data?>cd</p>'.encode("utf-8"))
+        lb, pi = p[0], p[1]
+        runs = [
+            TextRun(text="ab", node=lb, is_tail=True, plain_start=0, plain_end=2),
+            TextRun(text="data", node=pi, is_tail=False, plain_start=2, plain_end=6),
+            TextRun(text="cd", node=pi, is_tail=True, plain_start=6, plain_end=8),
+        ]
+        line = ExtractedLine(line_id="A", lb_element=lb, plain_text="abdatacd",
+                             text_runs=runs, notes=[], is_in_note=False, lang=["la"])
+        choice = etree.Element(trt._tag("choice"))
+        _insert_choice_at_line_end(line, 4, choice)     # offset inside PI .text run
+        self.assertIs(choice.getparent(), p)            # sibling of the PI, not child
 
 
 if __name__ == "__main__":
